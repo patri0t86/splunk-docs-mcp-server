@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+export DATABASE_URL="${DATABASE_URL:-}"
 
 if [[ -z "${DATABASE_URL:-}" ]]; then
 	echo "DATABASE_URL is required (example: postgres://user:password@127.0.0.1:5432/splunkdocs)" >&2
