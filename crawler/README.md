@@ -1,0 +1,89 @@
+# splunk-docs-crawler
+
+Sitemap-driven crawler for [help.splunk.com](https://help.splunk.com) that outputs
+markdown files (with YAML frontmatter) ready for chunking and indexing.
+
+## How it works
+
+- help.splunk.com publishes one sitemap per product
+  (e.g. `/en/splunk-enterprise/sitemap.xml`) with `<lastmod>` per page, so the
+  crawler never link-crawls — it fetches exactly the pages in scope.
+- The doc version is a URL path segment (`.../overview/10.4/...`), so
+  product/version scoping is pure URL filtering. Version comparison is numeric
+  (`10.2 > 9.4`).
+- Re-crawls are incremental: a page is skipped when its sitemap `lastmod`
+  matches the stored value and its output file still exists.
+- Politeness: robots.txt is honored, requests carry an identifying User-Agent,
+  and a global token-interval rate limiter caps requests/second. Transient
+  failures (429/5xx/network) retry with exponential backoff and honor
+  `Retry-After`.
+
+## Setup
+
+```sh
+cd crawler
+uv sync
+```
+
+## Usage
+
+```sh
+uv run splunk-docs-crawler plan                  # what's in scope, per version (no page fetches)
+uv run splunk-docs-crawler crawl --limit 10      # smoke test
+uv run splunk-docs-crawler crawl                 # full incremental crawl
+uv run splunk-docs-crawler crawl --force         # ignore lastmod, re-fetch everything
+uv run splunk-docs-crawler prune                 # list files no longer in scope (dry run)
+uv run splunk-docs-crawler prune --apply         # delete them (run before re-indexing)
+uv run splunk-docs-crawler status                # crawl state summary
+```
+
+The full corpus (Enterprise >= 9.4, SOAR >= 6.2, ES 8.x, ITSI >= 4.18,
+Cloud 10.x trains) is ~26,000 pages; run `plan` for current per-version
+counts. Re-runs only fetch changed pages.
+
+## Configuration (`config.yaml`)
+
+Per product: `sitemap`, `path_prefix`, and either `min_version` ("this version
+and newer") or `versions` (explicit allowlist, overrides `min_version`).
+Enable/disable products with `enabled`. Landing pages without a version
+segment are skipped unless `include_unversioned: true`.
+
+Sub-components inside a product tree keep their own version numbers (e.g. 4.x
+app manuals under splunk-enterprise); a `min_version` of 9.4 naturally
+excludes them.
+
+## Output
+
+```
+data/markdown/<product>/<version>/<url-path>.md   # version segment removed from path
+data/crawl_state.db                               # SQLite crawl state
+```
+
+Each file starts with frontmatter the chunker/indexer needs:
+
+```yaml
+---
+url: https://help.splunk.com/en/splunk-enterprise/get-started/overview/10.4/...
+title: About Splunk Enterprise
+product: splunk-enterprise
+version: '10.4'
+breadcrumbs: [Splunk Enterprise, Get Started, Overview, About Splunk Enterprise, ...]
+last_modified: '2026-05-02'
+fetched_at: '2026-07-16T18:00:00+00:00'
+content_hash: sha256:...
+---
+```
+
+Body is the article as markdown: ATX headings (`#`/`##`/`###` mirror the DITA
+topic nesting, so chunking on h2/h3 boundaries works), GitHub-style tables,
+fenced code blocks, absolute links.
+
+## Refresh
+
+Run `crawl` from cron/systemd on whatever cadence you want; `lastmod`
+comparison makes quiet runs cheap (one sitemap fetch, no page fetches). The
+indexer hashes each file's title+body itself, so re-indexing only touches
+changed files. Follow up with `prune --apply` periodically: pages that leave
+sitemap scope (aged-out versions, removed pages) otherwise stay on disk and
+keep getting indexed; the indexer's `-prune` flag then drops the matching DB
+rows.

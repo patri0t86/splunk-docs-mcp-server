@@ -1,0 +1,61 @@
+# Crawler behavior
+user_agent: "splunk-docs-crawler/0.1 (documentation indexing bot)"
+rate_limit_per_sec: 30       # max requests per second across all workers
+concurrency: 20               # parallel in-flight requests (still capped by rate limit)
+timeout_seconds: 30
+retries: 3
+
+# Paths are resolved relative to this config file
+output_dir: ../data/markdown
+state_db: ../data/crawl_state.db
+
+# Each key is a product slug matching its help.splunk.com URL prefix.
+# Versions are path segments like "10.4"; filtering is numeric, so 10.2 > 9.4.
+# Use either min_version (crawl that version and newer) or versions (explicit
+# allowlist, overrides min_version). Pages with no version segment in the URL
+# (landing/hub pages) are skipped unless include_unversioned is true.
+products:
+  splunk-enterprise:
+    enabled: true
+    sitemap: https://help.splunk.com/en/splunk-enterprise/sitemap.xml
+    path_prefix: /en/splunk-enterprise/
+    min_version: "9.4"
+    include_unversioned: false
+
+  # min_version 6.2 covers core SOAR (6.2.2 through 8.5.0 in the sitemap) and
+  # excludes the Splunk App for SOAR manuals, which version as 1.0.x.
+  splunk-soar:
+    enabled: true
+    sitemap: https://help.splunk.com/en/splunk-soar/sitemap.xml
+    path_prefix: /en/splunk-soar/
+    min_version: "6.2"
+    include_unversioned: false
+
+  # min_version 8.0 covers ES 8.0-8.5 and excludes co-hosted sub-products:
+  # Splunk App for PCI Compliance (5.x), Common Information Model (6.x),
+  # and Security Content Update.
+  splunk-enterprise-security-8:
+    enabled: true
+    sitemap: https://help.splunk.com/en/splunk-enterprise-security-8/sitemap.xml
+    path_prefix: /en/splunk-enterprise-security-8/
+    min_version: "8.0"
+    include_unversioned: false
+
+  # min_version 4.18 covers ITSI 4.18-5.0 plus IT Essentials Work (same
+  # version numbering) and excludes content packs, which version as 1.x-3.x.
+  splunk-it-service-intelligence:
+    enabled: true
+    sitemap: https://help.splunk.com/en/splunk-it-service-intelligence/sitemap.xml
+    path_prefix: /en/splunk-it-service-intelligence/
+    min_version: "4.18"
+    include_unversioned: false
+
+  # Cloud release trains version as <enterprise-version>.<YYMM>, e.g.
+  # 10.5.2605. min_version 10.0 covers every 10.x train and excludes the 9.x
+  # trains plus co-hosted app manuals (DB Connect 3.x, MLTK 5.7.x, etc.).
+  splunk-cloud-platform:
+    enabled: true
+    sitemap: https://help.splunk.com/en/splunk-cloud-platform/sitemap.xml
+    path_prefix: /en/splunk-cloud-platform/
+    min_version: "10.0"
+    include_unversioned: false

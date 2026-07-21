@@ -1,0 +1,22 @@
+[project]
+name = "splunk-docs-crawler"
+version = "0.1.0"
+description = "Polite, sitemap-driven crawler for help.splunk.com that outputs markdown for indexing"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "markdownify>=0.13",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+splunk-docs-crawler = "splunk_docs_crawler.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/splunk_docs_crawler"]

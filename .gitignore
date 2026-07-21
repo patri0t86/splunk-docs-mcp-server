@@ -1,0 +1,28 @@
+# Global repository hygiene
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Python
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Go build/test artifacts
+**/bin/
+**/*.test
+coverage.out
+
+# Local runtime data
+data/
+postgres/.pgdata/
