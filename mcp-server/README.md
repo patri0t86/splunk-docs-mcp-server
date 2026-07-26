@@ -43,5 +43,27 @@ cd mcp-server
 
 ## Endpoints
 
-- `POST /mcp`: Streamable MCP HTTP endpoint (Bearer auth required)
+- `POST /mcp`: Streamable MCP HTTP endpoint (****** required)
 - `GET /healthz`: Liveness endpoint (no auth)
+
+## systemd Service (Linux)
+
+Service unit file is provided at:
+
+- `/home/runner/work/splunk-docs-mcp-server/splunk-docs-mcp-server/deploy/systemd/splunk-docs-mcp-server.service`
+
+Install example:
+
+1. Create runtime directories and user:
+   - `sudo useradd --system --home /opt/splunk-docs-mcp-server --shell /usr/sbin/nologin splunkdocs`
+   - `sudo mkdir -p /opt/splunk-docs-mcp-server/bin /etc/splunk-docs-mcp-server`
+2. Copy the built binary to:
+   - `/opt/splunk-docs-mcp-server/bin/mcp-server`
+3. Create env file:
+   - `/etc/splunk-docs-mcp-server/mcp-server.env`
+   - include `DATABASE_URL`, `MCP_AUTH_TOKEN`, and optional `OLLAMA_URL`, `EMBEDDING_MODEL`, `LISTEN_ADDR`
+4. Install service file:
+   - `sudo cp deploy/systemd/splunk-docs-mcp-server.service /etc/systemd/system/`
+5. Enable and start:
+   - `sudo systemctl daemon-reload`
+   - `sudo systemctl enable --now splunk-docs-mcp-server.service`

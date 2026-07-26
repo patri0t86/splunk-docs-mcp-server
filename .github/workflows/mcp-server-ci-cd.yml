@@ -1,0 +1,95 @@
+name: MCP Server CI/CD
+
+on:
+  pull_request:
+    paths:
+      - "mcp-server/**"
+      - ".github/workflows/mcp-server-ci-cd.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "mcp-server/**"
+      - ".github/workflows/mcp-server-ci-cd.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Test and build mcp-server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Go
+        uses: actions/setup-go@v5.0.2
+        with:
+          go-version-file: mcp-server/go.mod
+          cache-dependency-path: mcp-server/go.sum
+
+      - name: Run unit tests
+        working-directory: mcp-server
+        env:
+          MCP_AUTH_TOKEN: 0123456789abcdef0123456789abcdef
+        run: go test ./...
+
+      - name: Build Linux amd64 binary
+        working-directory: mcp-server
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p ../dist
+          go build -trimpath -ldflags='-s -w' -o ../dist/mcp-server-linux-amd64 .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: mcp-server-linux-amd64
+          path: dist/mcp-server-linux-amd64
+          if-no-files-found: error
+
+  deploy-ec2:
+    name: Deploy artifact to EC2
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      secrets.EC2_HOST != '' &&
+      secrets.EC2_USER != '' &&
+      secrets.EC2_SSH_PRIVATE_KEY != ''
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4.1.8
+        with:
+          name: mcp-server-linux-amd64
+          path: dist
+
+      - name: Copy binary to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          source: dist/mcp-server-linux-amd64
+          target: /tmp
+
+      - name: Install binary and restart service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          script: |
+            set -euo pipefail
+            sudo install -D -m 0755 /tmp/dist/mcp-server-linux-amd64 /opt/splunk-docs-mcp-server/bin/mcp-server
+            sudo systemctl daemon-reload
+            sudo systemctl restart splunk-docs-mcp-server.service
+            sudo systemctl --no-pager --full status splunk-docs-mcp-server.service

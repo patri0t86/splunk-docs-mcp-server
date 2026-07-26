@@ -23,3 +23,16 @@ This project is for self-hosting a Splunk documentation MCP server after crawlin
 2. Install pgvector and initialize DB: follow [postgres](postgres/README.md).
 3. Index markdown: follow [indexer](indexer/README.md).
 4. Start MCP server: follow [mcp-server](mcp-server/README.md).
+
+## CI/CD and Deployment
+
+- GitHub Actions workflow: `.github/workflows/mcp-server-ci-cd.yml`
+  - Runs `go test ./...` in `mcp-server`.
+  - Builds Linux amd64 binary artifact: `mcp-server-linux-amd64`.
+  - Uploads the binary as a workflow artifact.
+- Optional EC2 deployment is included in the same workflow and runs only on `push` to `main` when all required secrets are set:
+  - `EC2_HOST`
+  - `EC2_USER`
+  - `EC2_SSH_PRIVATE_KEY`
+
+The deployment job copies the artifact to EC2, installs it to `/opt/splunk-docs-mcp-server/bin/mcp-server`, and restarts `splunk-docs-mcp-server.service`.

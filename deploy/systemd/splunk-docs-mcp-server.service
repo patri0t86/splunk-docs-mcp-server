@@ -1,0 +1,22 @@
+[Unit]
+Description=Splunk Docs MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=splunkdocs
+Group=splunkdocs
+WorkingDirectory=/opt/splunk-docs-mcp-server
+EnvironmentFile=/etc/splunk-docs-mcp-server/mcp-server.env
+ExecStart=/opt/splunk-docs-mcp-server/bin/mcp-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/splunk-docs-mcp-server
+
+[Install]
+WantedBy=multi-user.target
