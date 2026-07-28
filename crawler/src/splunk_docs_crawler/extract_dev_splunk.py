@@ -118,12 +118,6 @@ process.stdin.on('end', () => {
     const _provideComponents = () => customComponents;
     const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', src);
     const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
-    .replace(/export default (\w+);\s*$/m, 'return $1;')
-    .replace(/function _missingMdxReference\s*\([^)]*\)\s*\{[\s\S]*?\}/m, 'function _missingMdxReference() {}');
-
-  try {
-    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
-    const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
     // Unwrap CJS-style `return { default: MDXContent }` produced by some bundlers.
     const MDXContent = (rawResult && typeof rawResult === 'object' && typeof rawResult.default === 'function')
       ? rawResult.default
