@@ -1,16 +1,18 @@
 # splunk-docs-crawler
 
-Sitemap-driven crawler for [help.splunk.com](https://help.splunk.com) that outputs
-markdown files (with YAML frontmatter) ready for chunking and indexing.
+Sitemap-driven crawler for [help.splunk.com](https://help.splunk.com) and
+[lantern.splunk.com](https://lantern.splunk.com) that outputs markdown files
+(with YAML frontmatter) ready for chunking and indexing.
 
 ## How it works
 
 - help.splunk.com publishes one sitemap per product
   (e.g. `/en/splunk-enterprise/sitemap.xml`) with `<lastmod>` per page, so the
   crawler never link-crawls — it fetches exactly the pages in scope.
-- The doc version is a URL path segment (`.../overview/10.4/...`), so
-  product/version scoping is pure URL filtering. Version comparison is numeric
-  (`10.2 > 9.4`).
+- Most help.splunk.com docs carry a version path segment
+  (`.../overview/10.4/...`), so product/version scoping is pure URL filtering.
+  Version comparison is numeric (`10.2 > 9.4`). Splunk Lantern pages are
+  unversioned and are written under `_unversioned/`.
 - Re-crawls are incremental: a page is skipped when its sitemap `lastmod`
   matches the stored value and its output file still exists.
 - Politeness: robots.txt is honored, requests carry an identifying User-Agent,
@@ -38,15 +40,15 @@ uv run splunk-docs-crawler status                # crawl state summary
 ```
 
 The full corpus (Enterprise >= 9.4, SOAR >= 6.2, ES 8.x, ITSI >= 4.18,
-Cloud 10.x trains) is ~26,000 pages; run `plan` for current per-version
+Cloud 10.x trains, plus Lantern) is large; run `plan` for current per-version
 counts. Re-runs only fetch changed pages.
 
 ## Configuration (`config.yaml`)
 
 Per product: `sitemap`, `path_prefix`, and either `min_version` ("this version
 and newer") or `versions` (explicit allowlist, overrides `min_version`).
-Enable/disable products with `enabled`. Landing pages without a version
-segment are skipped unless `include_unversioned: true`.
+Enable/disable products with `enabled`. Pages without a version segment are
+skipped unless `include_unversioned: true` (used for Lantern).
 
 Sub-components inside a product tree keep their own version numbers (e.g. 4.x
 app manuals under splunk-enterprise); a `min_version` of 9.4 naturally

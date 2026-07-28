@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 def _parse_and_convert(html: str, url: str) -> tuple[PageContent, str]:
     """Runs in a pool process: parsing+conversion is CPU-bound and would
     otherwise block the event loop, starving the fetch workers."""
+    if urlsplit(url).hostname == "dev.splunk.com":
+        from .extract_dev_splunk import extract_dev_splunk
+        return extract_dev_splunk(html, url)
     page = extract(html, url)
     return page, to_markdown(page.content_html)
 
@@ -54,6 +57,8 @@ def output_path(base: Path, entry: SitemapEntry, product: ProductConfig) -> Path
     path = urlsplit(entry.url).path
     rest = path[len(product.path_prefix):].strip("/")
     segments = [s for s in rest.split("/") if s and not VERSION_RE.match(s)]
+    if not segments:
+        segments = ["index"]
     version_dir = entry.version or "_unversioned"
     return base / product.name / version_dir / ("/".join(segments) + ".md")
 

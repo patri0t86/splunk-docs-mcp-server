@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .config import CrawlerConfig, ProductConfig, load_config
 from .crawl import crawl_product, load_sitemap_entries, output_path
+from .crawl_splunk_ui import crawl_splunk_ui, splunk_ui_entries
 from .fetcher import Fetcher
 from .state import CrawlState
 
@@ -42,13 +43,24 @@ def enabled_products(config: CrawlerConfig, only: str | None) -> list[ProductCon
 
 
 async def run_plan(config: CrawlerConfig, only: str | None) -> None:
-    async with Fetcher(config.user_agent, config.rate_limit_per_sec, config.timeout_seconds, config.retries) as fetcher:
-        for product in enabled_products(config, only):
-            entries = await load_sitemap_entries(fetcher, product)
-            by_version = Counter(e.version or "(unversioned)" for e in entries)
-            print(f"\n{product.name}: {len(entries)} pages in scope")
-            for version, count in sorted(by_version.items()):
-                print(f"  {version:>14}  {count:>6} pages")
+    spa_products = [p for p in enabled_products(config, only) if p.spa]
+    regular_products = [p for p in enabled_products(config, only) if not p.spa]
+
+    for product in spa_products:
+        entries = splunk_ui_entries(product)
+        by_version: Counter = Counter(e.version or "(unversioned)" for e in entries)
+        print(f"\n{product.name}: {len(entries)} pages in scope")
+        for version, count in sorted(by_version.items()):
+            print(f"  {version:>14}  {count:>6} pages")
+
+    if regular_products:
+        async with Fetcher(config.user_agent, config.rate_limit_per_sec, config.timeout_seconds, config.retries) as fetcher:
+            for product in regular_products:
+                entries = await load_sitemap_entries(fetcher, product)
+                by_version = Counter(e.version or "(unversioned)" for e in entries)
+                print(f"\n{product.name}: {len(entries)} pages in scope")
+                for version, count in sorted(by_version.items()):
+                    print(f"  {version:>14}  {count:>6} pages")
 
 
 async def run_crawl(config: CrawlerConfig, only: str | None, limit: int | None, force: bool) -> int:
@@ -74,9 +86,14 @@ async def run_crawl(config: CrawlerConfig, only: str | None, limit: int | None, 
             for product in enabled_products(config, only):
                 if stop_event.is_set():
                     break
-                stats = await crawl_product(
-                    config, product, fetcher, state, limit=limit, force=force, stop_event=stop_event
-                )
+                if product.spa:
+                    stats = await crawl_splunk_ui(
+                        config, product, state, limit=limit, force=force, stop_event=stop_event
+                    )
+                else:
+                    stats = await crawl_product(
+                        config, product, fetcher, state, limit=limit, force=force, stop_event=stop_event
+                    )
                 print(
                     f"\n{product.name}: {stats.selected} in scope, "
                     f"{stats.skipped_fresh} fresh, {stats.fetched} fetched, "
@@ -113,7 +130,10 @@ async def run_prune(config: CrawlerConfig, only: str | None, apply: bool) -> int
                 product_dir = config.output_dir / product.name
                 if not product_dir.exists():
                     continue
-                entries = await load_sitemap_entries(fetcher, product)
+                if product.spa:
+                    entries = splunk_ui_entries(product)
+                else:
+                    entries = await load_sitemap_entries(fetcher, product)
                 expected = {output_path(config.output_dir, e, product) for e in entries}
                 on_disk = sorted(product_dir.rglob("*.md"))
                 stale = [p for p in on_disk if p not in expected]

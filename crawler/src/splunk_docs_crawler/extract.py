@@ -1,6 +1,7 @@
-"""Extract the documentation article from a help.splunk.com page.
+"""Extract the documentation article from Splunk docs pages.
 
-Pages are server-rendered from a DITA CCMS (Heretto). The layout that matters:
+help.splunk.com pages are server-rendered from a DITA CCMS (Heretto). The
+layout that matters:
 
     <div id="main-content-wrapper" class="content-body">
       <nav class="breadcrumbs"> <a>...</a> ... </nav>
@@ -34,6 +35,13 @@ NOISE_SELECTORS = [
     # "CODE" label and the textarea duplicates the <pre> content.
     ".code-block-header",
     "textarea.code-raw-content",
+    # Lantern article chrome.
+    "aside",
+    ".mt-content-side",
+    ".elm-meta-data",
+    ".mt-social-share",
+    ".wiki-tree",
+    ".custom-tree",
 ]
 
 
@@ -51,15 +59,22 @@ class PageContent:
 def extract(html: str, page_url: str) -> PageContent:
     soup = BeautifulSoup(html, "lxml")
 
-    breadcrumbs = [
-        a.get_text(strip=True)
-        for a in soup.select("nav.breadcrumbs a")
-        if a.get_text(strip=True)
-    ]
+    breadcrumbs = []
+    for a in soup.select("nav.breadcrumbs a"):
+        text = a.get_text(strip=True)
+        if text:
+            breadcrumbs.append(text)
+    if not breadcrumbs:
+        for li in soup.select("ol.mt-breadcrumbs li"):
+            text = li.get_text(strip=True)
+            if text:
+                breadcrumbs.append(text)
 
     main = (
-        soup.select_one("div.dita-content-container main")
+        soup.select_one("article#elm-main-content section.mt-content-container")
+        or soup.select_one("div.dita-content-container main")
         or soup.select_one("article[role='article']")
+        or soup.select_one("article#elm-main-content")
         or soup.select_one("#main-content-wrapper")
     )
     if main is None:

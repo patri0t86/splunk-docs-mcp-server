@@ -48,3 +48,16 @@ class OutputPathTests(unittest.TestCase):
             "/data/splunk-enterprise/10.4.1/administer/admin-manual/"
             "configuration-file-reference/10.4.1-configuration-file-reference/authorize.conf.md",
         )
+
+    def test_uses_index_name_when_path_is_empty(self) -> None:
+        product = ProductConfig(
+            name="splunk-lantern",
+            sitemap="https://lantern.splunk.com/sitemap.xml",
+            path_prefix="/",
+            include_unversioned=True,
+        )
+        entry = SitemapEntry(url="https://lantern.splunk.com/", lastmod=None, product=product.name, version=None)
+        self.assertEqual(
+            str(output_path(Path("/data"), entry, product)),
+            "/data/splunk-lantern/_unversioned/index.md",
+        )
