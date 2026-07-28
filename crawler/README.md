@@ -1,16 +1,26 @@
 # splunk-docs-crawler
 
-Sitemap-driven crawler for [help.splunk.com](https://help.splunk.com) that outputs
-markdown files (with YAML frontmatter) ready for chunking and indexing.
+Crawler for Splunk docs sources that outputs markdown files (with YAML
+frontmatter) ready for chunking and indexing:
+
+- [help.splunk.com](https://help.splunk.com) (sitemap-driven, versioned docs)
+- [lantern.splunk.com](https://lantern.splunk.com) (sitemap-driven, unversioned)
+- [dev.splunk.com](https://dev.splunk.com) (sitemap-driven, Next.js RSC/MDX extraction)
+- [splunkui.splunk.com](https://splunkui.splunk.com) (SPA-rendered via Playwright with a curated route list)
 
 ## How it works
 
-- help.splunk.com publishes one sitemap per product
+- help.splunk.com, lantern.splunk.com, and dev.splunk.com publish sitemaps.
+  help.splunk.com publishes one sitemap per product
   (e.g. `/en/splunk-enterprise/sitemap.xml`) with `<lastmod>` per page, so the
   crawler never link-crawls — it fetches exactly the pages in scope.
-- The doc version is a URL path segment (`.../overview/10.4/...`), so
-  product/version scoping is pure URL filtering. Version comparison is numeric
-  (`10.2 > 9.4`).
+- Most help.splunk.com docs carry a version path segment
+  (`.../overview/10.4/...`), so product/version scoping is pure URL filtering.
+  Version comparison is numeric (`10.2 > 9.4`). Lantern/dev/splunk-ui pages are
+  unversioned and are written under `_unversioned/`.
+- splunkui.splunk.com is a client-side SPA with no sitemap; the crawler renders
+  a maintained set of public routes with Playwright and extracts from the
+  rendered DOM.
 - Re-crawls are incremental: a page is skipped when its sitemap `lastmod`
   matches the stored value and its output file still exists.
 - Politeness: robots.txt is honored, requests carry an identifying User-Agent,
@@ -38,15 +48,17 @@ uv run splunk-docs-crawler status                # crawl state summary
 ```
 
 The full corpus (Enterprise >= 9.4, SOAR >= 6.2, ES 8.x, ITSI >= 4.18,
-Cloud 10.x trains) is ~26,000 pages; run `plan` for current per-version
-counts. Re-runs only fetch changed pages.
+Cloud 10.x trains, plus Lantern/dev/splunk-ui) is large; run `plan` for
+current per-version counts. Re-runs only fetch changed pages.
 
 ## Configuration (`config.yaml`)
 
 Per product: `sitemap`, `path_prefix`, and either `min_version` ("this version
 and newer") or `versions` (explicit allowlist, overrides `min_version`).
-Enable/disable products with `enabled`. Landing pages without a version
-segment are skipped unless `include_unversioned: true`.
+Enable/disable products with `enabled`. Pages without a version segment are
+skipped unless `include_unversioned: true` (used for Lantern/dev/splunk-ui).
+Set `spa: true` for SPA-backed products that should bypass sitemap fetching and
+use a custom route provider + browser-render pipeline.
 
 Sub-components inside a product tree keep their own version numbers (e.g. 4.x
 app manuals under splunk-enterprise); a `min_version` of 9.4 naturally

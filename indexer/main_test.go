@@ -83,9 +83,12 @@ func TestSplitChunks(t *testing.T) {
 
 func TestURLProduct(t *testing.T) {
 	cases := map[string]string{
-		"https://help.splunk.com/en/splunk-enterprise/get-started/10.4/about": "splunk-enterprise",
-		"https://help.splunk.com/en/splunk-cloud-platform/search/10.5.2605/x": "splunk-cloud-platform",
-		"https://example.com/whatever":                                        "",
+		"https://help.splunk.com/en/splunk-enterprise/get-started/10.4/about":                                       "splunk-enterprise",
+		"https://help.splunk.com/en/splunk-cloud-platform/search/10.5.2605/x":                                       "splunk-cloud-platform",
+		"https://lantern.splunk.com/Security_Use_Cases/Advanced_Threat_Detection/Triaging_Crowdstrike_malware_data": "splunk-lantern",
+		"https://dev.splunk.com/enterprise/docs/developapps/createapps/appanatomy/":                                 "splunk-dev",
+		"https://splunkui.splunk.com/DesignSystem/GettingStarted":                                                   "splunk-ui",
+		"https://example.com/whatever": "",
 	}
 	for url, want := range cases {
 		if got := urlProduct(url); got != want {

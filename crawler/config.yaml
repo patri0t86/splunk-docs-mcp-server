@@ -9,7 +9,7 @@ retries: 3
 output_dir: ../data/markdown
 state_db: ../data/crawl_state.db
 
-# Each key is a product slug matching its help.splunk.com URL prefix.
+# Each key is a product slug written into frontmatter and output paths.
 # Versions are path segments like "10.4"; filtering is numeric, so 10.2 > 9.4.
 # Use either min_version (crawl that version and newer) or versions (explicit
 # allowlist, overrides min_version). Pages with no version segment in the URL
@@ -59,3 +59,28 @@ products:
     path_prefix: /en/splunk-cloud-platform/
     min_version: "10.0"
     include_unversioned: false
+
+  # Lantern pages are unversioned and live directly under the site root.
+  splunk-lantern:
+    enabled: true
+    sitemap: https://lantern.splunk.com/sitemap.xml
+    path_prefix: /
+    include_unversioned: true
+
+  # Splunk Developer Program: Next.js RSC/MDX site — unversioned. Category and
+  # hub pages (no MDX content) will surface as ExtractError in the crawl log
+  # but do not affect the indexed content.
+  splunk-dev:
+    enabled: true
+    sitemap: https://dev.splunk.com/sitemap.xml
+    path_prefix: /
+    include_unversioned: true
+
+  # Splunk UI Design System: pure SPA (single JS bundle, no sitemap).
+  # Routes are hardcoded in crawl_splunk_ui.py; Playwright renders each page.
+  splunk-ui:
+    enabled: true
+    spa: true
+    sitemap: ""
+    path_prefix: /
+    include_unversioned: true

@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -86,6 +87,7 @@ type embedJob struct {
 
 type outcome struct {
 	url       string
+	product   string
 	chunks    int
 	unchanged bool
 	err       error
@@ -421,14 +423,29 @@ func parseDocument(path string) (*document, error) {
 	return &document{path: path, fm: fm, hash: hash, chunks: splitChunks(body)}, nil
 }
 
-// urlProduct returns the product slug of a docs URL
-// (https://help.splunk.com/en/<product>/...), or "".
-func urlProduct(url string) string {
-	parts := strings.Split(url, "/")
-	if len(parts) < 6 || parts[3] != "en" {
+// urlProduct returns the product slug for known Splunk docs hosts.
+func urlProduct(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
 		return ""
 	}
-	return parts[4]
+	switch strings.ToLower(u.Hostname()) {
+	case "lantern.splunk.com":
+		return "splunk-lantern"
+	case "dev.splunk.com":
+		return "splunk-dev"
+	case "splunkui.splunk.com":
+		return "splunk-ui"
+	case "help.splunk.com":
+		path := strings.Trim(u.Path, "/")
+		parts := strings.Split(path, "/")
+		if len(parts) < 2 || parts[0] != "en" {
+			return ""
+		}
+		return parts[1]
+	default:
+		return ""
+	}
 }
 
 // pruneStale deletes documents (chunks follow via cascade) whose URLs were
@@ -447,7 +464,7 @@ func pruneStale(ctx context.Context, pool *pgxpool.Pool, liveURLs []string) (int
 	}
 	tag, err := pool.Exec(ctx, `
 		DELETE FROM documents
-		WHERE split_part(url, '/', 5) = ANY($1)
+		WHERE product = ANY($1)
 		  AND NOT (url = ANY($2))
 	`, slugs, liveURLs)
 	if err != nil {
@@ -605,7 +622,7 @@ func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, 
 			}
 			doc := result.doc
 			if hashes[doc.fm.URL] == doc.hash {
-				sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, unchanged: true})
+				sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, product: doc.fm.Product, unchanged: true})
 				continue
 			}
 			doc.embeddings = make([][]float32, len(doc.chunks))
@@ -682,7 +699,7 @@ func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, 
 				if err != nil {
 					err = fmt.Errorf("writing %s: %w", doc.fm.URL, err)
 				}
-				sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, chunks: len(doc.chunks), err: err})
+				sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, product: doc.fm.Product, chunks: len(doc.chunks), err: err})
 			}
 		}()
 	}

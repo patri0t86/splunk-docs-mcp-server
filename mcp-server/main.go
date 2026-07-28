@@ -114,8 +114,8 @@ func getEnvDefault(key, fallback string) string {
 
 type SearchArgs struct {
 	Query      string `json:"query" jsonschema:"the search query"`
-	Product    string `json:"product,omitempty" jsonschema:"optional product to filter by: splunk-enterprise, splunk-cloud-platform, splunk-enterprise-security-8, splunk-soar, or splunk-it-service-intelligence"`
-	Version    string `json:"version,omitempty" jsonschema:"optional doc version to filter by, e.g. 10.2 (Splunk Enterprise), 10.5.2605 (Splunk Cloud release train), 8.5 (ES)"`
+	Product    string `json:"product,omitempty" jsonschema:"optional product to filter by, e.g. splunk-enterprise, splunk-cloud-platform, splunk-enterprise-security-8, splunk-soar, splunk-it-service-intelligence, splunk-lantern, splunk-dev, or splunk-ui"`
+	Version    string `json:"version,omitempty" jsonschema:"optional doc version to filter by for versioned products, e.g. 10.2 (Splunk Enterprise), 10.5.2605 (Splunk Cloud release train), or 8.5 (ES)"`
 	MaxResults int    `json:"max_results,omitempty" jsonschema:"maximum number of results to return, default 5"`
 }
 
@@ -242,7 +242,7 @@ func searchDocs(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) 
 		log.Printf("search_docs: no strict keyword hits, retrying keyword leg as %q", kwQuery)
 	}
 
-	// Product/version filters run inside each leg, not after: with five
+	// Product/version filters run inside each leg, not after: with multiple
 	// products in one index, a post-filter would let the dominant products
 	// crowd a filtered query's candidates out of the fixed-size pools.
 	rows, err := pool.Query(ctx, `
@@ -290,7 +290,12 @@ func searchDocs(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) 
 			       max(score) OVER (PARTITION BY product, title) AS group_score,
 			       row_number() OVER (
 			           PARTITION BY product, title
-			           ORDER BY string_to_array(version, '.')::int[] DESC, score DESC
+			           ORDER BY
+			               CASE
+			                   WHEN version ~ '^[0-9]+(\\.[0-9]+)+$' THEN string_to_array(version, '.')::int[]
+			                   ELSE NULL
+			               END DESC NULLS LAST,
+			               score DESC
 			       ) AS rn
 			FROM scored
 		)
@@ -319,8 +324,12 @@ func searchDocs(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) 
 			return nil, nil, errors.New("search failed, try again shortly")
 		}
 		count++
-		fmt.Fprintf(&sb, "## %s (%s v%s)\n%s > %s\n%s\n\n%s\n\n---\n\n",
-			title, product, version, breadcrumb, heading, pageURL, snippet)
+		productLabel := product
+		if version != "" {
+			productLabel = fmt.Sprintf("%s v%s", product, version)
+		}
+		fmt.Fprintf(&sb, "## %s (%s)\n%s > %s\n%s\n\n%s\n\n---\n\n",
+			title, productLabel, breadcrumb, heading, pageURL, snippet)
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("search_docs: ERROR reading rows after %s: %v", time.Since(dbStart).Round(time.Millisecond), err)
@@ -420,7 +429,12 @@ func resolveURL(ctx context.Context, raw string) (string, bool) {
 		SELECT url
 		FROM documents
 		WHERE replace(lower(url), '-', '') LIKE '%' || $1 || '%'
-		ORDER BY string_to_array(version, '.')::int[] DESC, length(url)
+		ORDER BY
+			CASE
+				WHEN version ~ '^[0-9]+(\\.[0-9]+)+$' THEN string_to_array(version, '.')::int[]
+				ELSE NULL
+			END DESC NULLS LAST,
+			length(url)
 		LIMIT 1
 	`, slug).Scan(&resolved)
 	if err != nil {
@@ -615,12 +629,12 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search Splunk documentation (Splunk Enterprise, Splunk Cloud Platform, Enterprise Security, SOAR, and IT Service Intelligence) by keyword and meaning. Returns the best-matching sections with links, deduplicated to the newest version of each page per product. Pass product (e.g. \"splunk-soar\") and/or version (e.g. \"10.2\") to narrow the search. Use get_page for the full page a result came from.",
+		Description: "Search Splunk documentation (Splunk Enterprise, Splunk Cloud Platform, Enterprise Security, SOAR, IT Service Intelligence, Splunk Lantern, the Splunk Developer Program, and the Splunk UI Design System) by keyword and meaning. Returns the best-matching sections with links, deduplicated to the newest version of each page per product. Pass product (e.g. \"splunk-soar\") and/or version (e.g. \"10.2\") to narrow the search. Use get_page for the full page a result came from.",
 	}, searchDocs)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_page",
-		Description: "Fetch the full content of a Splunk documentation page by URL, typically from a search_docs result. Also resolves the help.splunk.com/?resourceId=... cross-reference links that appear inside documentation pages.",
+		Description: "Fetch the full content of a Splunk documentation page by URL, typically from a search_docs result. Also resolves help.splunk.com/?resourceId=... cross-reference links and nearby URL variants.",
 	}, getPage)
 
 	handler := mcp.NewStreamableHTTPHandler(

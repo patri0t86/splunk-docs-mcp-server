@@ -1,10 +1,10 @@
 # Splunk Docs MCP (Self-Hosted)
 
-This project is for self-hosting a Splunk documentation MCP server after crawling and indexing Splunk docs into PostgreSQL + pgvector.
+This project is for self-hosting a Splunk documentation MCP server after crawling and indexing Splunk docs (help.splunk.com, Splunk Lantern, dev.splunk.com, and Splunk UI Design System docs) into PostgreSQL + pgvector.
 
 ## Pipeline Overview
 
-1. Crawl docs from help.splunk.com into local markdown.
+1. Crawl docs from help.splunk.com, lantern.splunk.com, dev.splunk.com, and splunkui.splunk.com into local markdown.
 2. Index markdown into PostgreSQL with full-text + vector search.
 3. Run the MCP server with authenticated `search_docs` and `get_page` tools.
 
