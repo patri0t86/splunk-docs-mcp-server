@@ -267,6 +267,9 @@ async def crawl_splunk_ui(
                     "\n"
                     "Then re-download the browser:\n"
                     "  uv run playwright install chromium"
+                    "\n"
+                    "On Debian/Ubuntu:\n"
+                    "  uv run playwright install-deps"
                 ) from exc
             raise
         context = await browser.new_context()
