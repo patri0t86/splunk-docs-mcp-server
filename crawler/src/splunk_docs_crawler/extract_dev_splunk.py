@@ -97,12 +97,21 @@ process.stdin.on('end', () => {
   const jsx = (type, props) => {
     if (type === Fragment) return { __text: extractText(props && props.children) };
     if (typeof type === 'string') return { __text: makeEl(type, props) };
+<<<<<<< HEAD
     // Functions include _createMdxContent and children-preserving component stubs.
     if (typeof type === 'function') return type(props || {});
+=======
+    // Functions: call them (handles both _createMdxContent and custom components
+    // like CardLayout/PreviousNextWidget which are stubs that return children).
+    if (typeof type === 'function') {
+      try { return type(props || {}); } catch (_) { return { __text: '' }; }
+    }
+>>>>>>> origin/master
     return { __text: extractText(props && props.children) };
   };
   const jsxs = jsx;
 
+<<<<<<< HEAD
   const stubComponent = (props) => ({ __text: extractText(props && props.children) });
 
   function convertSource(src) {
@@ -117,6 +126,35 @@ process.stdin.on('end', () => {
     }
     const _provideComponents = () => customComponents;
     const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', src);
+=======
+  // Stub for any custom component: returns a no-op function that renders children.
+  const stubComponent = (props) => ({ __text: extractText(props && props.children) });
+  const _provideComponents = () => ({});
+
+  // Patch compiled source: remove the two arguments[0] destructuring lines
+  // and the ESM export so we can run it with new Function().
+  // Production builds return { default: MDXContent } instead of using
+  // `export default MDXContent;`, so we must handle both forms.
+  // Also neutralise _missingMdxReference guards — custom components like
+  // CardLayout and PreviousNextWidget aren't provided by _provideComponents,
+  // so MDX would throw before reaching the jsx() call. We replace the guard
+  // function with a no-op so those components fall back to children-only output.
+  const patched = src
+    .replace(/^"use strict";\s*/m, '')
+    .replace(/const \{Fragment:\s*_Fragment,\s*jsx:\s*_jsx,\s*jsxs:\s*_jsxs\}\s*=\s*arguments\[0\];\s*/m, '')
+    .replace(/const \{useMDXComponents:\s*_provideComponents\}\s*=\s*arguments\[0\];\s*/m, '')
+    .replace(/export default (\w+);\s*$/m, 'return $1;')
+    .replace(/function _missingMdxReference\s*\([^)]*\)\s*\{[\s\S]*?\}/m, 'function _missingMdxReference() {}');
+
+  try {
+    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
+    const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
+    .replace(/export default (\w+);\s*$/m, 'return $1;')
+    .replace(/function _missingMdxReference\s*\([^)]*\)\s*\{[\s\S]*?\}/m, 'function _missingMdxReference() {}');
+
+  try {
+    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
+>>>>>>> origin/master
     const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
     // Unwrap CJS-style `return { default: MDXContent }` produced by some bundlers.
     const MDXContent = (rawResult && typeof rawResult === 'object' && typeof rawResult.default === 'function')
