@@ -1,7 +1,8 @@
 # MCP Server
 
-This service exposes the indexed Splunk docs corpus (including Splunk Lantern)
-through MCP tools over HTTP.
+This service exposes the indexed Splunk docs corpus (help.splunk.com, Splunk
+Lantern, dev.splunk.com, and Splunk UI Design System docs) through MCP tools
+over HTTP.
 
 Tools:
 - `search_docs`: hybrid keyword + semantic retrieval
