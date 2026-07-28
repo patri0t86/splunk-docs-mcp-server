@@ -57,7 +57,12 @@ uv run playwright install chromium
 **Debian / Ubuntu:**
 
 ```sh
-uv run playwright install-deps
+# Install all Playwright browser dependencies automatically:
+sudo playwright install-deps
+uv run playwright install chromium
+
+# Or install only the missing packages explicitly:
+sudo apt-get install -y libcairo2 libpango-1.0-0
 uv run playwright install chromium
 ```
 

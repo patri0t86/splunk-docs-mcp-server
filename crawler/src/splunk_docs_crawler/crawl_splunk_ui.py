@@ -261,7 +261,10 @@ async def crawl_splunk_ui(
                     "Then re-download the browser:\n"
                     "  uv run playwright install chromium\n"
                     "\n"
-                    "On Debian/Ubuntu: sudo playwright install-deps"
+                    "On Debian/Ubuntu:\n"
+                    "  sudo apt-get install -y libcairo2 libpango-1.0-0\n"
+                    "  # or: sudo playwright install-deps\n"
+                    "  uv run playwright install chromium"
                 ) from exc
             raise
         context = await browser.new_context()
