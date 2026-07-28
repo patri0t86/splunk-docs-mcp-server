@@ -52,13 +52,8 @@ system libraries first (Playwright's `install-deps` only covers Debian/Ubuntu):
 ```sh
 sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \
   libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \
-<<<<<<< HEAD
   alsa-lib at-spi2-atk nss nspr libdrm cups-libs \
   cairo pango
-=======
-alsa-lib at-spi2-atk nss nspr libdrm cups-libs \
-cairo pango
->>>>>>> origin/master
 uv run playwright install chromium
 ```
 
