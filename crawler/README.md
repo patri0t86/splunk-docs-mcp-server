@@ -50,19 +50,15 @@ system libraries first (Playwright's `install-deps` only covers Debian/Ubuntu):
 ```sh
 sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \
   libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \
-  alsa-lib at-spi2-atk nss nspr libdrm cups-libs
+  alsa-lib at-spi2-atk nss nspr libdrm cups-libs \
+  cairo pango
 uv run playwright install chromium
 ```
 
 **Debian / Ubuntu:**
 
 ```sh
-# Install all Playwright browser dependencies automatically:
 sudo playwright install-deps
-uv run playwright install chromium
-
-# Or install only the missing packages explicitly:
-sudo apt-get install -y libcairo2 libpango-1.0-0
 uv run playwright install chromium
 ```
 

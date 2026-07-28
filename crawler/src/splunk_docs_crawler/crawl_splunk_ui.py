@@ -256,14 +256,10 @@ async def crawl_splunk_ui(
                     "\n"
                     "  sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \\\n"
                     "    libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \\\n"
-                    "    alsa-lib at-spi2-atk nss nspr libdrm cups-libs\n"
+                    "    alsa-lib at-spi2-atk nss nspr libdrm cups-libs \\\n"
+                    "    cairo pango\n"
                     "\n"
                     "Then re-download the browser:\n"
-                    "  uv run playwright install chromium\n"
-                    "\n"
-                    "On Debian/Ubuntu:\n"
-                    "  sudo apt-get install -y libcairo2 libpango-1.0-0\n"
-                    "  # or: sudo playwright install-deps\n"
                     "  uv run playwright install chromium"
                 ) from exc
             raise
