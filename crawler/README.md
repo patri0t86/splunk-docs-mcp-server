@@ -35,6 +35,35 @@ cd crawler
 uv sync
 ```
 
+### Playwright system dependencies (splunk-ui only)
+
+Crawling `splunkui.splunk.com` uses Playwright to render the SPA. After
+`uv sync`, install the browser binary:
+
+```sh
+uv run playwright install chromium
+```
+
+**Amazon Linux 2023 / RHEL / Fedora (including Graviton aarch64)** — install
+system libraries first (Playwright's `install-deps` only covers Debian/Ubuntu):
+
+```sh
+sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \
+  libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \
+  alsa-lib at-spi2-atk nss nspr libdrm cups-libs
+uv run playwright install chromium
+```
+
+**Debian / Ubuntu:**
+
+```sh
+uv run playwright install-deps
+uv run playwright install chromium
+```
+
+If you don't need `splunk-ui`, set `enabled: false` in `config.yaml` for that
+product and skip this step.
+
 ## Usage
 
 ```sh

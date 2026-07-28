@@ -244,7 +244,26 @@ async def crawl_splunk_ui(
     sem = asyncio.Semaphore(config.concurrency)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch()
+        try:
+            browser = await pw.chromium.launch()
+        except Exception as exc:
+            msg = str(exc)
+            if "missing dependencies" in msg or "Host system is missing" in msg or "BrowserType.launch" in msg:
+                raise RuntimeError(
+                    "Playwright cannot launch Chromium — system libraries are missing.\n"
+                    "\n"
+                    "On Amazon Linux 2023 / RHEL / Fedora (including Graviton/aarch64), install:\n"
+                    "\n"
+                    "  sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \\\n"
+                    "    libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \\\n"
+                    "    alsa-lib at-spi2-atk nss nspr libdrm cups-libs\n"
+                    "\n"
+                    "Then re-download the browser:\n"
+                    "  uv run playwright install chromium\n"
+                    "\n"
+                    "On Debian/Ubuntu: sudo playwright install-deps"
+                ) from exc
+            raise
         context = await browser.new_context()
         try:
             tasks = [
