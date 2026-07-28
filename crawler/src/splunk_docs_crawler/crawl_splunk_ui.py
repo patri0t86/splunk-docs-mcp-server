@@ -176,13 +176,19 @@ def _extract_content(html: str, url: str) -> tuple[PageContent, str]:
         t = soup.find("title")
         title = t.get_text(strip=True).split(" - ")[0] if t else url.rstrip("/").split("/")[-1]
 
-    # Content: the MDX-rendered section has a stable id prefix; fall back to <main>
+    # Content: the MDX-rendered section has a stable id prefix; fall back to
+    # the layout main area, then the generic <main> element.
     content_section = soup.select_one("section[id^='markdown-content-']")
     if content_section is None:
         content_section = soup.find(id="react-docs-layout-main")
         if content_section:
             # Remove sidebar nav so we don't index navigation links as content
             for aside in content_section.find_all("nav", attrs={"aria-label": "Secondary"}):
+                aside.decompose()
+    if content_section is None:
+        content_section = soup.find("main")
+        if content_section:
+            for aside in content_section.find_all("nav"):
                 aside.decompose()
 
     if content_section is None:
