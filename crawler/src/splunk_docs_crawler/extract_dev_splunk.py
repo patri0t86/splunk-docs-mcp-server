@@ -106,15 +106,21 @@ process.stdin.on('end', () => {
 
   // Patch compiled source: remove the two arguments[0] destructuring lines
   // and the ESM export so we can run it with new Function().
+  // Production builds return { default: MDXContent } instead of using
+  // `export default MDXContent;`, so we must handle both forms.
   const patched = src
     .replace(/^"use strict";\s*/m, '')
     .replace(/const \{Fragment:\s*_Fragment,\s*jsx:\s*_jsx,\s*jsxs:\s*_jsxs\}\s*=\s*arguments\[0\];\s*/m, '')
     .replace(/const \{useMDXComponents:\s*_provideComponents\}\s*=\s*arguments\[0\];\s*/m, '')
-    .replace(/export default (\w+);\s*$/, 'return $1;');
+    .replace(/export default (\w+);\s*$/m, 'return $1;');
 
   try {
     const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
-    const MDXContent = fn(Fragment, jsx, jsxs, () => ({}));
+    const rawResult = fn(Fragment, jsx, jsxs, () => ({}));
+    // Unwrap CJS-style `return { default: MDXContent }` produced by some bundlers.
+    const MDXContent = (rawResult && typeof rawResult === 'object' && typeof rawResult.default === 'function')
+      ? rawResult.default
+      : rawResult;
     if (!MDXContent || typeof MDXContent !== 'function') {
       process.stderr.write('MDXContent is not a function\n');
       process.exit(1);
