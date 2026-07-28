@@ -66,6 +66,8 @@ def select_entries(
         path = urlsplit(url).path
         if not path.startswith(product.path_prefix):
             continue
+        if path in product.exclude_paths:
+            continue
         version = extract_version(path)
         if not product.accepts_version(version):
             continue

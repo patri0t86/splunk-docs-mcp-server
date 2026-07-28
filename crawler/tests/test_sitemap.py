@@ -3,7 +3,7 @@ from pathlib import Path
 
 from splunk_docs_crawler.config import ProductConfig
 from splunk_docs_crawler.crawl import output_path
-from splunk_docs_crawler.sitemap import SitemapEntry, extract_version
+from splunk_docs_crawler.sitemap import SitemapEntry, extract_version, select_entries
 
 
 class ExtractVersionTests(unittest.TestCase):
@@ -19,6 +19,29 @@ class ExtractVersionTests(unittest.TestCase):
 
     def test_ignores_non_version_numeric_prefixes(self) -> None:
         self.assertIsNone(extract_version("/en/splunk-enterprise/404-errors/about"))
+
+
+class SelectEntriesTests(unittest.TestCase):
+    def test_excludes_configured_non_article_paths(self) -> None:
+        product = ProductConfig(
+            name="splunk-dev",
+            sitemap="https://dev.splunk.com/sitemap.xml",
+            path_prefix="/",
+            include_unversioned=True,
+            exclude_paths=frozenset({"/", "/search/"}),
+        )
+        entries = select_entries(
+            [
+                ("https://dev.splunk.com/", None),
+                ("https://dev.splunk.com/search/", None),
+                ("https://dev.splunk.com/enterprise/reference/", None),
+            ],
+            product,
+        )
+        self.assertEqual(
+            [entry.url for entry in entries],
+            ["https://dev.splunk.com/enterprise/reference/"],
+        )
 
 
 class OutputPathTests(unittest.TestCase):
