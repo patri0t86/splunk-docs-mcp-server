@@ -35,7 +35,7 @@ Typical run:
 cd indexer
 export DATABASE_URL='postgres://<user>:<password>@<host>:5432/splunkdocs'
 export OLLAMA_URL='http://127.0.0.1:11434'
-go run . -prune ../data/markdown
+go run . -prune -all-versions ../data/markdown
 ```
 
 Using helper script:
@@ -49,7 +49,9 @@ cd indexer
 
 - `-prune`: remove database documents whose files are no longer on disk (scoped
   by `documents.product` values seen in the input set).
-- `-all-versions`: include superseded patch-version directories; default behavior skips them to reduce duplicate content.
+- `-all-versions`: include superseded patch-version directories. The helper script
+  enables this so every folder produced by the crawler is indexed; omit it for an
+  ad hoc reduced index that keeps only the latest patch in each release line.
 - `-embed-workers`, `-batch-size`, `-parse-workers`, `-write-workers`: throughput tuning.
 - `-ollama-url`, `-model`: override embedding backend/model.
 

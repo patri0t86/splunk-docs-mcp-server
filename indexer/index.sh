@@ -9,4 +9,4 @@ if [[ -z "${DATABASE_URL:-}" ]]; then
 	exit 1
 fi
 
-go run . -prune -embed-workers 4 -batch-size 128 ../data/markdown
+go run . -prune -all-versions -embed-workers 4 -batch-size 128 ../data/markdown
