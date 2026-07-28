@@ -16,25 +16,22 @@ This module:
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
-import tempfile
 from urllib.parse import urlsplit
 
 from .extract import ExtractError, PageContent
 
 # ---------------------------------------------------------------------------
-# Node.js shim: evaluates the compiled MDX source and writes markdown to stdout.
-# The compiled source uses ``arguments[0]`` to receive {Fragment, jsx, jsxs,
-# useMDXComponents}. We patch out those two destructuring lines and pass
-# our shims directly as function parameters to ``new Function(...)``.
+# Node.js shim: evaluates prepared MDX source and writes markdown to stdout.
+# Source rewriting happens in Python so the shim remains valid JavaScript on
+# every supported Node runtime and architecture.
 # ---------------------------------------------------------------------------
 _NODE_SHIM = r"""
 'use strict';
 process.stdin.setEncoding('utf8');
-let src = '';
-process.stdin.on('data', d => { src += d; });
+let input = '';
+process.stdin.on('data', d => { input += d; });
 process.stdin.on('end', () => {
   const Fragment = Symbol('Fragment');
   const LI_SEP = '\uE000';
@@ -109,33 +106,20 @@ process.stdin.on('end', () => {
   };
   const jsxs = jsx;
 
-  // Stub for any custom component: returns a no-op function that renders children.
   const stubComponent = (props) => ({ __text: extractText(props && props.children) });
-  const _provideComponents = () => ({});
 
-  // Patch compiled source: remove the two arguments[0] destructuring lines
-  // and the ESM export so we can run it with new Function().
-  // Production builds return { default: MDXContent } instead of using
-  // `export default MDXContent;`, so we must handle both forms.
-  // Also neutralise _missingMdxReference guards — custom components like
-  // CardLayout and PreviousNextWidget aren't provided by _provideComponents,
-  // so MDX would throw before reaching the jsx() call. We replace the guard
-  // function with a no-op so those components fall back to children-only output.
-  const patched = src
-    .replace(/^"use strict";\s*/m, '')
-    .replace(/const \{Fragment:\s*_Fragment,\s*jsx:\s*_jsx,\s*jsxs:\s*_jsxs\}\s*=\s*arguments\[0\];\s*/m, '')
-    .replace(/const \{useMDXComponents:\s*_provideComponents\}\s*=\s*arguments\[0\];\s*/m, '')
-    .replace(/export default (\w+);\s*$/m, 'return $1;')
-    .replace(/function _missingMdxReference\s*\([^)]*\)\s*\{[\s\S]*?\}/m, 'function _missingMdxReference() {}');
-
-  try {
-    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
-    const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
-    .replace(/export default (\w+);\s*$/m, 'return $1;')
-    .replace(/function _missingMdxReference\s*\([^)]*\)\s*\{[\s\S]*?\}/m, 'function _missingMdxReference() {}');
-
-  try {
-    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', patched);
+  function convertSource(src) {
+    // Supply children-preserving stubs for custom components referenced by the
+    // compiled MDX. This satisfies _missingMdxReference guards without changing
+    // the generated function bodies.
+    const customComponents = {};
+    const referencePattern = /_missingMdxReference\(["']([^"']+)["']/g;
+    let match;
+    while ((match = referencePattern.exec(src)) !== null) {
+      customComponents[match[1]] = stubComponent;
+    }
+    const _provideComponents = () => customComponents;
+    const fn = new Function('_Fragment', '_jsx', '_jsxs', '_provideComponents', src);
     const rawResult = fn(Fragment, jsx, jsxs, _provideComponents);
     // Unwrap CJS-style `return { default: MDXContent }` produced by some bundlers.
     const MDXContent = (rawResult && typeof rawResult === 'object' && typeof rawResult.default === 'function')
@@ -146,14 +130,28 @@ process.stdin.on('end', () => {
       process.exit(1);
     }
     const result = MDXContent({});
-    const text = (result && result.__text) ? result.__text : '';
-    process.stdout.write(text);
+    return (result && result.__text) ? result.__text : '';
+  }
+
+  try {
+    const sources = JSON.parse(input);
+    const markdown = sources.map(convertSource).filter(Boolean).join('\n\n');
+    process.stdout.write(markdown);
   } catch (e) {
     process.stderr.write('Error evaluating MDX: ' + e.toString() + '\n');
     process.exit(1);
   }
 });
 """
+
+_ARGUMENT_BINDING_RE = re.compile(
+    r"^\s*const\s+\{[^}\n]+\}\s*=\s*arguments\[0\]\s*;\s*",
+    re.MULTILINE,
+)
+_ESM_EXPORT_RE = re.compile(
+    r"^\s*export\s+default\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*;\s*$",
+    re.MULTILINE,
+)
 
 # Maps the first URL path segment to a human-readable section title.
 _SECTION_TITLES: dict[str, str] = {
@@ -188,10 +186,34 @@ def _parse_rsc_chunks(html: str) -> list[str]:
 
 def _find_compiled_mdx(chunks: list[str]) -> str | None:
     """Return the compiled MDX source string, or None if not present."""
+    sources = _find_compiled_mdx_sources(chunks)
+    return sources[0] if sources else None
+
+
+def _find_compiled_mdx_sources(chunks: list[str]) -> list[str]:
+    """Return every compiled MDX source embedded in the RSC chunks."""
+    sources: list[str] = []
+    seen: set[str] = set()
     for chunk in chunks:
-        if "function _createMdxContent" in chunk:
-            return chunk
-    return None
+        if "function _createMdxContent" not in chunk:
+            continue
+        candidates = []
+        if chunk.lstrip().startswith('"use strict";'):
+            candidates.append(chunk)
+        else:
+            for match in re.finditer(
+                r'"compiledSource":("(?:\\.|[^"\\])*")',
+                chunk,
+            ):
+                try:
+                    candidates.append(json.loads(match.group(1)))
+                except json.JSONDecodeError:
+                    continue
+        for source in candidates:
+            if "function _createMdxContent" in source and source not in seen:
+                seen.add(source)
+                sources.append(source)
+    return sources
 
 
 def _find_title(chunks: list[str]) -> str:
@@ -275,26 +297,43 @@ def _build_breadcrumbs(nav_items: list[dict], current_path: str, page_url: str) 
 # Node.js invocation
 # ---------------------------------------------------------------------------
 
+def _prepare_mdx_source(compiled_source: str) -> str:
+    """Adapt compiled MDX to the runtime bindings supplied by the Node shim."""
+    source = re.sub(r'^\s*"use strict"\s*;\s*', "", compiled_source, count=1)
+    source = _ARGUMENT_BINDING_RE.sub("", source)
+    source = _ESM_EXPORT_RE.sub(r"return \1;", source, count=1)
+    if re.search(r"^\s*export\s+default\b", source, re.MULTILINE):
+        raise ExtractError("unsupported MDX export format")
+    return source
+
+
 def _mdx_to_markdown(compiled_source: str) -> str:
     """Evaluate the compiled MDX source via Node.js and return markdown text."""
-    fd, shim_path = tempfile.mkstemp(suffix=".cjs")
+    return _mdx_sources_to_markdown([compiled_source])
+
+
+def _mdx_sources_to_markdown(compiled_sources: list[str]) -> str:
+    """Evaluate one or more compiled MDX sources in a single Node process."""
+    prepared_sources = [_prepare_mdx_source(source) for source in compiled_sources]
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(_NODE_SHIM)
         result = subprocess.run(
-            ["node", shim_path],
-            input=compiled_source,
+            ["node", "-e", _NODE_SHIM],
+            input=json.dumps(prepared_sources),
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            raise ExtractError(
-                f"MDX→markdown conversion failed: {result.stderr[:300]}"
-            )
-        return result.stdout
-    finally:
-        os.unlink(shim_path)
+    except FileNotFoundError as exc:
+        raise ExtractError(
+            "MDX→markdown conversion requires Node.js on PATH"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ExtractError("MDX→markdown conversion timed out after 30 seconds") from exc
+    if result.returncode != 0:
+        raise ExtractError(
+            f"MDX→markdown conversion failed: {result.stderr[:300]}"
+        )
+    return result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +348,8 @@ def extract_dev_splunk(html: str, page_url: str) -> tuple[PageContent, str]:
     """
     chunks = _parse_rsc_chunks(html)
 
-    compiled_source = _find_compiled_mdx(chunks)
-    if compiled_source is None:
+    compiled_sources = _find_compiled_mdx_sources(chunks)
+    if not compiled_sources:
         raise ExtractError(f"no MDX article content found in {page_url}")
 
     title = _find_title(chunks)
@@ -320,7 +359,7 @@ def extract_dev_splunk(html: str, page_url: str) -> tuple[PageContent, str]:
     nav_items, current_path = _find_nav_data(chunks)
     breadcrumbs = _build_breadcrumbs(nav_items, current_path, page_url)
 
-    markdown = _mdx_to_markdown(compiled_source)
+    markdown = _mdx_sources_to_markdown(compiled_sources)
     if not markdown.strip():
         raise ExtractError(f"MDX conversion produced empty output for {page_url}")
 

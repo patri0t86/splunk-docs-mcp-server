@@ -27,6 +27,7 @@ class ProductConfig:
     versions: frozenset[str] | None = None  # explicit allowlist, overrides min_version
     include_unversioned: bool = False
     spa: bool = False  # single-page app — bypasses sitemap/fetch pipeline, uses Playwright
+    exclude_paths: frozenset[str] = frozenset()
 
     def accepts_version(self, version: str | None) -> bool:
         if version is None:
@@ -67,6 +68,7 @@ def load_config(path: Path) -> CrawlerConfig:
             versions=frozenset(str(v) for v in versions) if versions else None,
             include_unversioned=bool(entry.get("include_unversioned", False)),
             spa=bool(entry.get("spa", False)),
+            exclude_paths=frozenset(str(path) for path in (entry.get("exclude_paths") or [])),
         )
 
     return CrawlerConfig(

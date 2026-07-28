@@ -27,6 +27,14 @@ from .state import CrawlState
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://splunkui.splunk.com"
+CONTENT_SELECTORS = (
+    "section[id^='markdown-content-']",
+    "#react-docs-layout-main",
+    "main",
+)
+MIN_CONTENT_TEXT_LENGTH = 100
+MAX_BROWSER_CONCURRENCY = 4
+PAGE_TIMEOUT_MS = 60_000
 
 # Complete list of documentation routes extracted from the JS bundle's
 # React Router config (all unversioned, no sitemap available).
@@ -151,11 +159,19 @@ async def _render_page(browser_context, url: str, sem: asyncio.Semaphore) -> tup
     async with sem:
         page = await browser_context.new_page()
         try:
-            await page.goto(url, wait_until="networkidle", timeout=30_000)
-            try:
-                await page.wait_for_selector("h1", timeout=10_000)
-            except Exception:
-                pass  # some pages may not have h1; continue anyway
+            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+            await page.wait_for_function(
+                """config => config.selectors.some(selector => {
+                    const element = document.querySelector(selector);
+                    return element &&
+                        element.textContent.trim().length >= config.minTextLength;
+                })""",
+                arg={
+                    "selectors": CONTENT_SELECTORS,
+                    "minTextLength": MIN_CONTENT_TEXT_LENGTH,
+                },
+                timeout=PAGE_TIMEOUT_MS,
+            )
             title = await page.title()
             html = await page.content()
             return title, html
@@ -247,7 +263,9 @@ async def crawl_splunk_ui(
     if not pending:
         return stats
 
-    sem = asyncio.Semaphore(config.concurrency)
+    # A t4g.medium cannot reliably render 20 Chromium tabs in parallel. Keep
+    # HTTP crawling at the configured concurrency while bounding this SPA.
+    sem = asyncio.Semaphore(min(config.concurrency, MAX_BROWSER_CONCURRENCY))
 
     async with async_playwright() as pw:
         try:
@@ -345,6 +363,6 @@ async def _render_and_write(
             http_status=0,
         )
 
-    done = stats.fetched + len(stats.errors)
+    done = stats.written + len(stats.errors)
     if done and done % 10 == 0:
         log.info("%s: %d rendered so far", product.name, done)

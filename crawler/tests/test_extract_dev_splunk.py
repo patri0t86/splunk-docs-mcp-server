@@ -4,10 +4,13 @@ import json
 from splunk_docs_crawler.extract_dev_splunk import (
     _parse_rsc_chunks,
     _find_compiled_mdx,
+    _find_compiled_mdx_sources,
     _find_title,
     _find_in_nav,
     _build_breadcrumbs,
+    _prepare_mdx_source,
     _mdx_to_markdown,
+    _mdx_sources_to_markdown,
     extract_dev_splunk,
 )
 from splunk_docs_crawler.extract import ExtractError
@@ -46,6 +49,28 @@ function MDXContent(props = {}) {
 export default MDXContent;
 """
 
+_CUSTOM_COMPONENT_MDX = """\
+"use strict";
+const {Fragment: _Fragment, jsx: _jsx, jsxs: _jsxs} = arguments[0];
+const {useMDXComponents: _provideComponents} = arguments[0];
+function _createMdxContent(props) {
+  const {CardLayout} = {..._provideComponents(), ...props.components};
+  if (!CardLayout) _missingMdxReference("CardLayout", true);
+  return _jsx(CardLayout, {
+    children: _jsx("p", {children: "Text inside a custom component."})
+  });
+}
+function MDXContent(props = {}) {
+  return _createMdxContent(props);
+}
+function _missingMdxReference(id, component) {
+  throw new Error("Expected component " + id + " to be defined");
+}
+return {
+  default: MDXContent
+};
+"""
+
 _TITLE_CHUNK = '16:{"title":{"title":"Test Page Title","headingLevel":1},"toc":[]}'
 
 _NAV_CHUNK = (
@@ -78,6 +103,29 @@ class TestFindCompiledMdx(unittest.TestCase):
 
     def test_returns_none_when_absent(self) -> None:
         self.assertIsNone(_find_compiled_mdx([_TITLE_CHUNK, _NAV_CHUNK]))
+
+    def test_extracts_source_from_rsc_object(self) -> None:
+        chunk = (
+            '16:["$","article",null,{"source":{"compiledSource":'
+            + json.dumps(_MINIMAL_MDX)
+            + ',"frontmatter":{}}}]'
+        )
+        self.assertEqual(_find_compiled_mdx_sources([chunk]), [_MINIMAL_MDX])
+
+    def test_extracts_multiple_unique_sources(self) -> None:
+        chunk = (
+            '19:{"description":{"compiledSource":'
+            + json.dumps(_MINIMAL_MDX)
+            + '},"operation":{"compiledSource":'
+            + json.dumps(_CUSTOM_COMPONENT_MDX)
+            + '},"duplicate":{"compiledSource":'
+            + json.dumps(_MINIMAL_MDX)
+            + "}}"
+        )
+        self.assertEqual(
+            _find_compiled_mdx_sources([chunk]),
+            [_MINIMAL_MDX, _CUSTOM_COMPONENT_MDX],
+        )
 
 
 class TestFindTitle(unittest.TestCase):
@@ -152,11 +200,34 @@ class TestBuildBreadcrumbs(unittest.TestCase):
 
 
 class TestMdxToMarkdown(unittest.TestCase):
+    def test_prepares_esm_source_for_node_function(self) -> None:
+        source = _prepare_mdx_source(_MINIMAL_MDX)
+        self.assertNotIn("arguments[0]", source)
+        self.assertNotIn("export default", source)
+        self.assertIn("return MDXContent;", source)
+
     def test_basic_conversion(self) -> None:
         md = _mdx_to_markdown(_MINIMAL_MDX)
         self.assertIn("Hello world.", md)
         self.assertIn("## Details", md)
         self.assertIn("More text here.", md)
+
+    def test_preserves_children_of_custom_components(self) -> None:
+        md = _mdx_to_markdown(_CUSTOM_COMPONENT_MDX)
+        self.assertIn("Text inside a custom component.", md)
+
+    def test_converts_multiple_sources_in_one_node_process(self) -> None:
+        md = _mdx_sources_to_markdown([_MINIMAL_MDX, _CUSTOM_COMPONENT_MDX])
+        self.assertIn("Hello world.", md)
+        self.assertIn("Text inside a custom component.", md)
+
+    def test_supports_runtime_binding_without_fragment(self) -> None:
+        source = _MINIMAL_MDX.replace(
+            "const {Fragment: _Fragment, jsx: _jsx, jsxs: _jsxs} = arguments[0];",
+            "const {jsx: _jsx, jsxs: _jsxs} = arguments[0];",
+        ).replace("_jsxs(_Fragment", '_jsxs("div"')
+        md = _mdx_to_markdown(source)
+        self.assertIn("Hello world.", md)
 
     def test_raises_on_bad_source(self) -> None:
         with self.assertRaises(ExtractError):

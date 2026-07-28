@@ -35,6 +35,8 @@ cd crawler
 uv sync
 ```
 
+The `dev.splunk.com` MDX converter also requires Node.js 18 or later on `PATH`.
+
 ### Playwright system dependencies (splunk-ui only)
 
 Crawling `splunkui.splunk.com` uses Playwright to render the SPA. After
@@ -50,8 +52,8 @@ system libraries first (Playwright's `install-deps` only covers Debian/Ubuntu):
 ```sh
 sudo dnf install -y atk libX11 libXcomposite libXdamage libXext \
   libXfixes libXrandr mesa-libgbm libxcb libxkbcommon \
-alsa-lib at-spi2-atk nss nspr libdrm cups-libs \
-cairo pango
+  alsa-lib at-spi2-atk nss nspr libdrm cups-libs \
+  cairo pango
 uv run playwright install chromium
 ```
 
@@ -83,8 +85,9 @@ current per-version counts. Re-runs only fetch changed pages.
 
 ## Configuration (`config.yaml`)
 
-Per product: `sitemap`, `path_prefix`, and either `min_version` ("this version
-and newer") or `versions` (explicit allowlist, overrides `min_version`).
+Per product: `sitemap`, `path_prefix`, optional exact `exclude_paths`, and either
+`min_version` ("this version and newer") or `versions` (explicit allowlist,
+overrides `min_version`).
 Enable/disable products with `enabled`. Pages without a version segment are
 skipped unless `include_unversioned: true` (used for Lantern/dev/splunk-ui).
 Set `spa: true` for SPA-backed products that should bypass sitemap fetching and

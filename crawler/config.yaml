@@ -67,14 +67,19 @@ products:
     path_prefix: /
     include_unversioned: true
 
-  # Splunk Developer Program: Next.js RSC/MDX site — unversioned. Category and
-  # hub pages (no MDX content) will surface as ExtractError in the crawl log
-  # but do not affect the indexed content.
+  # Splunk Developer Program: Next.js RSC/MDX site — unversioned. Exclude the
+  # navigation-only routes that the sitemap publishes without MDX articles.
   splunk-dev:
     enabled: true
     sitemap: https://dev.splunk.com/sitemap.xml
     path_prefix: /
     include_unversioned: true
+    exclude_paths:
+      - /
+      - /search/
+      - /enterprise/
+      - /enterprise/docs/
+      - /observability/
 
   # Splunk UI Design System: pure SPA (single JS bundle, no sitemap).
   # Routes are hardcoded in crawl_splunk_ui.py; Playwright renders each page.

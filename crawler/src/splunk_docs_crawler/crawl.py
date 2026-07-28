@@ -113,7 +113,10 @@ async def crawl_product(
     for entry in pending:
         queue.put_nowait(entry)
 
+    completed = 0
+
     async def worker() -> None:
+        nonlocal completed
         while not (stop_event is not None and stop_event.is_set()):
             try:
                 entry = queue.get_nowait()
@@ -126,9 +129,9 @@ async def crawl_product(
                 log.error("%s: %s", entry.url, exc)
             finally:
                 queue.task_done()
-                done = stats.fetched + len(stats.errors)
-                if done and done % 50 == 0:
-                    log.info("%s: %d/%d fetched", product.name, done, len(pending))
+                completed += 1
+                if completed % 50 == 0:
+                    log.info("%s: %d/%d fetched", product.name, completed, len(pending))
 
     async def process_page(entry: SitemapEntry) -> None:
         if not await fetcher.allowed_by_robots(entry.url):
@@ -155,7 +158,7 @@ async def crawl_product(
                 lastmod=entry.lastmod, content_hash=None, file_path=None,
                 http_status=200,
             )
-            stats.errors.append(str(exc))
+            stats.errors.append(f"{entry.url}: {exc}")
             return
 
         document = render_document(entry, page, markdown)
