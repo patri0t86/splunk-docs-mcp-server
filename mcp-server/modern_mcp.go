@@ -48,16 +48,74 @@ func newDualMCPHandler(modern, legacy http.Handler, origins string) http.Handler
 	}
 }
 
+const serverVersion = "1.3.0"
+
+// serverInstructions tells a client how the tools compose: discovery, then
+// bounded citable evidence, with the whole page reserved for broad reading.
+const serverInstructions = "Use search_docs to find relevant Splunk documentation sections, then get_section with a result's section_id for bounded, citable evidence, or get_page for a complete page. " +
+	"Call list_docsets to discover the products, versions and manuals that are indexed before filtering on them, and compare_versions to see what changed between two versions of the same page."
+
+// toolDescriptions is shared by both protocol handlers so the two transports
+// can never advertise different tools.
+var toolDescriptions = map[string]string{
+	"search_docs": "Search the indexed Splunk documentation corpus and return ranked sections with stable section ids, citation URLs and match provenance. " +
+		"Copies of the same page across product versions are collapsed to the newest by default. " +
+		"Follow up with get_section for the exact text, or get_page for the whole page.",
+	"get_section": "Retrieve one documentation section by the section_id from a search_docs result, optionally with neighbouring sections for context. " +
+		"Prefer this over get_page when you need quotable evidence rather than a whole page.",
+	"get_page":     "Retrieve the complete indexed content for a Splunk documentation URL. Use when a whole page is genuinely needed; get_section is cheaper and cites more precisely.",
+	"list_docsets": "List the indexed products, their versions, page counts, manuals and index freshness. Call this to discover valid product and version filter values.",
+	"compare_versions": "Report the sections that were added, removed or changed between two versions of the same documentation page, with unified text diffs. " +
+		"Differences come from the indexed source text, not from a model-written summary.",
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// Every tool is a read-only lookup against a local index: no writes, no
+// side effects, and no requests to anything outside this deployment.
+func readOnlyAnnotations() *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		ReadOnlyHint:    true,
+		DestructiveHint: ptr(false),
+		IdempotentHint:  true,
+		OpenWorldHint:   ptr(false),
+	}
+}
+
 func newLegacyMCPHandler() http.Handler {
-	server := mcp.NewServer(&mcp.Implementation{Name: "splunk-docs", Version: "1.2.0"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "splunk-docs", Version: serverVersion}, &mcp.ServerOptions{
+		Instructions: serverInstructions,
+	})
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search_docs",
-		Description: "Search the indexed Splunk documentation corpus. Optionally narrow results by product and version. Use get_page with a result URL for the full page.",
+		Title:       "Search Splunk documentation",
+		Description: toolDescriptions["search_docs"],
+		Annotations: readOnlyAnnotations(),
 	}, searchDocs)
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "get_section",
+		Title:       "Get a documentation section",
+		Description: toolDescriptions["get_section"],
+		Annotations: readOnlyAnnotations(),
+	}, getSection)
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_page",
-		Description: "Retrieve the complete indexed content for a Splunk documentation URL.",
+		Title:       "Get Splunk documentation page",
+		Description: toolDescriptions["get_page"],
+		Annotations: readOnlyAnnotations(),
 	}, getPage)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_docsets",
+		Title:       "List indexed docsets",
+		Description: toolDescriptions["list_docsets"],
+		Annotations: readOnlyAnnotations(),
+	}, listDocsets)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "compare_versions",
+		Title:       "Compare two versions of a page",
+		Description: toolDescriptions["compare_versions"],
+		Annotations: readOnlyAnnotations(),
+	}, compareVersions)
 	return mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
 		&mcp.StreamableHTTPOptions{},
@@ -135,7 +193,7 @@ func (h *modernMCPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.rpcResult(w, request.ID, map[string]any{
 			"supportedVersions": []string{modernProtocolVersion},
 			"capabilities":      map[string]any{"tools": map[string]any{}},
-			"instructions":      "Use search_docs to find relevant Splunk documentation, then get_page to retrieve a complete result page.",
+			"instructions":      serverInstructions,
 		})
 	case "tools/list":
 		h.rpcResult(w, request.ID, map[string]any{"tools": modernTools()})
@@ -212,26 +270,113 @@ func decodeMCPHeader(value string) (string, error) {
 }
 
 func modernTools() []map[string]any {
+	stringArray := func(description string) map[string]any {
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": description}
+	}
 	return []map[string]any{
 		{
 			"name": "search_docs", "title": "Search Splunk documentation",
-			"description": "Search the indexed Splunk documentation corpus. Optionally narrow results by product and version. Use get_page with a result URL for the full page.",
-			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+			"description": toolDescriptions["search_docs"],
+			"annotations": readOnlyToolAnnotations,
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 				"query":       map[string]any{"type": "string", "description": "Search query."},
-				"product":     map[string]any{"type": "string", "description": "Optional indexed product filter."},
-				"version":     map[string]any{"type": "string", "description": "Optional document version filter."},
+				"product":     map[string]any{"type": "string", "description": "Optional single indexed product filter."},
+				"products":    stringArray("Optional list of indexed products to restrict the search to."),
+				"version":     map[string]any{"type": "string", "description": "Optional single document version filter."},
+				"versions":    stringArray("Optional list of document versions to restrict the search to."),
+				"manuals":     stringArray("Optional list of manuals to restrict the search to."),
+				"mode":        map[string]any{"type": "string", "enum": []string{modeAuto, modeExact, modeConceptual}, "description": "Retrieval mode; auto detects technical identifiers."},
+				"latest_only": map[string]any{"type": "boolean", "description": "Collapse copies of a page across versions to the newest; default true."},
 				"max_results": map[string]any{"type": "integer", "minimum": 1, "maximum": maxResultsCap, "description": "Maximum results to return; default 5."},
 			}, "required": []string{"query"}},
+			"outputSchema": searchOutputSchema(),
+		},
+		{
+			"name": "get_section", "title": "Get a documentation section",
+			"description": toolDescriptions["get_section"],
+			"annotations": readOnlyToolAnnotations,
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"section_id":     map[string]any{"type": "string", "description": "Section identifier from a search_docs result."},
+				"context_before": map[string]any{"type": "integer", "minimum": 0, "maximum": maxContextSections, "description": "Preceding sections to include; default 0."},
+				"context_after":  map[string]any{"type": "integer", "minimum": 0, "maximum": maxContextSections, "description": "Following sections to include; default 0."},
+				"max_chars":      map[string]any{"type": "integer", "minimum": 1, "maximum": maxSectionChars, "description": "Truncate returned text; default 12000."},
+			}, "required": []string{"section_id"}},
 		},
 		{
 			"name": "get_page", "title": "Get Splunk documentation page",
-			"description": "Retrieve the complete indexed content for a Splunk documentation URL.",
-			"annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false},
+			"description": toolDescriptions["get_page"],
+			"annotations": readOnlyToolAnnotations,
 			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 				"url": map[string]any{"type": "string", "format": "uri", "description": "Documentation URL returned by search_docs."},
 			}, "required": []string{"url"}},
 		},
+		{
+			"name": "list_docsets", "title": "List indexed docsets",
+			"description": toolDescriptions["list_docsets"],
+			"annotations": readOnlyToolAnnotations,
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"product":         map[string]any{"type": "string", "description": "Optional product to describe in detail."},
+				"include_manuals": map[string]any{"type": "boolean", "description": "Also list manuals; only applied together with product."},
+			}},
+		},
+		{
+			"name": "compare_versions", "title": "Compare two versions of a page",
+			"description": toolDescriptions["compare_versions"],
+			"annotations": readOnlyToolAnnotations,
+			"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
+				"document_id":  map[string]any{"type": "string", "description": "Version-independent page id from a search_docs result."},
+				"url":          map[string]any{"type": "string", "format": "uri", "description": "Any indexed URL of the page, if document_id is unknown."},
+				"from_version": map[string]any{"type": "string", "description": "Older version to compare."},
+				"to_version":   map[string]any{"type": "string", "description": "Newer version to compare."},
+				"max_chars":    map[string]any{"type": "integer", "minimum": 1, "maximum": maxSectionChars, "description": "Truncate the rendered diff; default 12000."},
+			}, "required": []string{"from_version", "to_version"}},
+		},
+	}
+}
+
+var readOnlyToolAnnotations = map[string]any{
+	"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false,
+}
+
+// searchOutputSchema describes the structured search payload. Search is the
+// tool whose results get carried around and cited, so its shape is declared
+// rather than left for the client to infer from the text rendering.
+func searchOutputSchema() map[string]any {
+	stringProp := map[string]any{"type": "string"}
+	stringArrayProp := map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": stringProp,
+			"mode":  stringProp,
+			"count": map[string]any{"type": "integer"},
+			"results": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"rank":              map[string]any{"type": "integer"},
+						"section_id":        stringProp,
+						"document_id":       stringProp,
+						"title":             stringProp,
+						"product":           stringProp,
+						"version":           stringProp,
+						"manual":            stringProp,
+						"breadcrumb":        stringArrayProp,
+						"heading":           stringProp,
+						"url":               stringProp,
+						"anchor":            stringProp,
+						"citation_url":      stringProp,
+						"snippet":           stringProp,
+						"match_types":       stringArrayProp,
+						"content_hash":      stringProp,
+						"source_updated_at": stringProp,
+					},
+					"required": []string{"rank", "section_id", "document_id", "title", "product", "url", "citation_url", "snippet", "match_types"},
+				},
+			},
+		},
+		"required": []string{"query", "mode", "count", "results"},
 	}
 }
 
@@ -245,17 +390,43 @@ func (h *modernMCPHandler) callTool(w http.ResponseWriter, r *http.Request, requ
 		return
 	}
 	var result *mcp.CallToolResult
+	var structured any
 	var err error
 	switch params.Name {
 	case "search_docs":
 		var arguments SearchArgs
 		if err = json.Unmarshal(params.Arguments, &arguments); err == nil {
-			result, _, err = searchDocs(r.Context(), nil, arguments)
+			var out *SearchOutput
+			result, out, err = searchDocs(r.Context(), nil, arguments)
+			structured = nilIfEmpty(out)
+		}
+	case "get_section":
+		var arguments GetSectionArgs
+		if err = json.Unmarshal(params.Arguments, &arguments); err == nil {
+			var out *SectionOutput
+			result, out, err = getSection(r.Context(), nil, arguments)
+			structured = nilIfEmpty(out)
 		}
 	case "get_page":
 		var arguments GetPageArgs
 		if err = json.Unmarshal(params.Arguments, &arguments); err == nil {
-			result, _, err = getPage(r.Context(), nil, arguments)
+			var out *PageOutput
+			result, out, err = getPage(r.Context(), nil, arguments)
+			structured = nilIfEmpty(out)
+		}
+	case "list_docsets":
+		var arguments ListDocsetsArgs
+		if err = json.Unmarshal(params.Arguments, &arguments); err == nil {
+			var out *ListDocsetsOutput
+			result, out, err = listDocsets(r.Context(), nil, arguments)
+			structured = nilIfEmpty(out)
+		}
+	case "compare_versions":
+		var arguments CompareVersionsArgs
+		if err = json.Unmarshal(params.Arguments, &arguments); err == nil {
+			var out *CompareVersionsOutput
+			result, out, err = compareVersions(r.Context(), nil, arguments)
+			structured = nilIfEmpty(out)
 		}
 	default:
 		h.rpcError(w, request.ID, http.StatusBadRequest, -32602, "Unknown tool: "+params.Name, nil)
@@ -271,7 +442,20 @@ func (h *modernMCPHandler) callTool(w http.ResponseWriter, r *http.Request, requ
 			texts = append(texts, map[string]string{"type": "text", "text": text.Text})
 		}
 	}
-	h.rpcResult(w, request.ID, map[string]any{"content": texts})
+	payload := map[string]any{"content": texts}
+	if structured != nil {
+		payload["structuredContent"] = structured
+	}
+	h.rpcResult(w, request.ID, payload)
+}
+
+// nilIfEmpty converts a typed nil pointer to an untyped nil, so a tool that
+// returned no structured payload doesn't serialize as "structuredContent": null.
+func nilIfEmpty[T any](out *T) any {
+	if out == nil {
+		return nil
+	}
+	return out
 }
 
 func (h *modernMCPHandler) rpcToolError(w http.ResponseWriter, id json.RawMessage, message string) {
@@ -280,7 +464,7 @@ func (h *modernMCPHandler) rpcToolError(w http.ResponseWriter, id json.RawMessag
 
 func (h *modernMCPHandler) rpcResult(w http.ResponseWriter, id json.RawMessage, result map[string]any) {
 	result["resultType"] = "complete"
-	result["_meta"] = map[string]any{"io.modelcontextprotocol/serverInfo": map[string]string{"name": "splunk-docs", "version": "1.2.0"}}
+	result["_meta"] = map[string]any{"io.modelcontextprotocol/serverInfo": map[string]string{"name": "splunk-docs", "version": serverVersion}}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(id), "result": result})
 }

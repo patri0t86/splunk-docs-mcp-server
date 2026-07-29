@@ -6,7 +6,12 @@ This project is for self-hosting a Splunk documentation MCP server after crawlin
 
 1. Crawl docs from help.splunk.com, lantern.splunk.com, dev.splunk.com, and splunkui.splunk.com into local markdown.
 2. Index markdown into PostgreSQL with full-text + vector search.
-3. Run the MCP server with authenticated `search_docs` and `get_page` tools.
+3. Run the MCP server, which exposes five authenticated tools over HTTP:
+   - `search_docs`: ranked section retrieval with stable ids and citation URLs
+   - `get_section`: one section by id, for bounded quotable evidence
+   - `get_page`: a complete page by URL
+   - `list_docsets`: the indexed products, versions and manuals
+   - `compare_versions`: what changed between two versions of a page
 
 ## Repository Guide
 

@@ -31,17 +31,35 @@ import (
 )
 
 type frontmatter struct {
-	URL         string   `yaml:"url"`
-	Title       string   `yaml:"title"`
-	Product     string   `yaml:"product"`
-	Version     string   `yaml:"version"`
-	Breadcrumbs []string `yaml:"breadcrumbs"`
+	URL          string   `yaml:"url"`
+	Title        string   `yaml:"title"`
+	Product      string   `yaml:"product"`
+	Version      string   `yaml:"version"`
+	Breadcrumbs  []string `yaml:"breadcrumbs"`
+	LastModified string   `yaml:"last_modified"`
 }
 
 // breadcrumb flattens the frontmatter breadcrumbs list into the single
 // "A > B > C" string stored in documents.breadcrumb.
 func (fm frontmatter) breadcrumb() string {
 	return strings.Join(fm.Breadcrumbs, " > ")
+}
+
+// sourceUpdated parses the docs site's own last-modified stamp. The corpus
+// carries both RFC 3339 timestamps (help.splunk.com) and bare dates
+// (lantern.splunk.com); anything else is treated as absent rather than
+// failing the document.
+func (fm frontmatter) sourceUpdated() *time.Time {
+	value := strings.TrimSpace(fm.LastModified)
+	if value == "" || value == "null" {
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return &t
+		}
+	}
+	return nil
 }
 
 type chunk struct {
@@ -65,6 +83,17 @@ type document struct {
 	hash       string
 	chunks     []chunk
 	embeddings [][]float32
+	// metaOnly documents are already ingested with identical content and
+	// only need their derived metadata (manual, canonical id, aliases,
+	// section ids, literal tsvector) refreshed -- no embedding work.
+	metaOnly bool
+}
+
+// key is the stable, reindex-surviving identity of a document, used as the
+// prefix of every section_id it owns. It is derived from the URL rather than
+// from a SERIAL column so section ids survive a full re-ingest.
+func (d *document) key() string {
+	return hashContent(d.fm.URL)[:16]
 }
 
 type parseResult struct {
@@ -86,11 +115,12 @@ type embedJob struct {
 }
 
 type outcome struct {
-	url       string
-	product   string
-	chunks    int
-	unchanged bool
-	err       error
+	url        string
+	product    string
+	chunks     int
+	unchanged  bool
+	backfilled bool
+	err        error
 }
 
 type ollamaClient struct {
@@ -448,6 +478,108 @@ func urlProduct(rawURL string) string {
 	}
 }
 
+// versionSegRe matches the version segment of a help.splunk.com path: a
+// dotted release number ("10.4", "9.4.13", "10.5.2605") or the moving
+// "latest" alias.
+var versionSegRe = regexp.MustCompile(`^(latest|\d+(\.\d+)*)$`)
+
+// docPathSegments returns the meaningful path segments of a documentation
+// URL: for help.splunk.com the "/en/<product>" prefix is stripped, for the
+// single-product hosts the whole path is meaningful.
+func docPathSegments(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
+	}
+	path := strings.Trim(u.Path, "/")
+	if path == "" {
+		return nil
+	}
+	segs := strings.Split(path, "/")
+	if strings.EqualFold(u.Hostname(), "help.splunk.com") && len(segs) >= 2 && segs[0] == "en" {
+		segs = segs[2:]
+	}
+	return segs
+}
+
+// docLocation derives the manual a page belongs to and its canonical,
+// version-independent identity.
+//
+// The corpus holds a near-identical copy of nearly every page for every
+// product version, and hundreds of distinct pages share a title
+// ("Troubleshooting", "Prerequisites", "Fixed issues"). Collapsing version
+// copies therefore has to key on page identity, not on the title: two
+// unrelated "Troubleshooting" pages must not suppress each other, while the
+// 10.2 and 10.4 copies of one page must collapse into one result.
+//
+// help.splunk.com paths are ".../<category>/<manual>/<version>/<page path>",
+// so the manual is the segment before the version and the canonical path is
+// everything else with the version segment removed. lantern/dev/ui pages are
+// unversioned, so the whole path is canonical and the first segment is the
+// closest thing they have to a manual.
+func docLocation(rawURL, product, version string) (manual, canonicalID string) {
+	segs := docPathSegments(rawURL)
+	if len(segs) == 0 {
+		return "", ""
+	}
+	versionAt := -1
+	for i, seg := range segs {
+		if seg == version || versionSegRe.MatchString(seg) {
+			versionAt = i
+			break
+		}
+	}
+	canonical := segs
+	if versionAt >= 0 {
+		canonical = append(append([]string{}, segs[:versionAt]...), segs[versionAt+1:]...)
+		if versionAt > 0 {
+			manual = segs[versionAt-1]
+		}
+	}
+	if manual == "" {
+		manual = canonical[0]
+	}
+	if product == "" {
+		product = urlProduct(rawURL)
+	}
+	return manual, strings.ToLower(product + "/" + strings.Join(canonical, "/"))
+}
+
+var aliasCleanRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+// normalizeAlias lowercases and strips every non-alphanumeric character.
+// help.splunk.com cross-references pages as ?resourceId=Splunk_X_Topicid,
+// where the topic id is the page slug with its punctuation removed
+// ("Referencehardware" for "reference-hardware"), so stripping punctuation on
+// both sides makes the two forms compare equal.
+func normalizeAlias(s string) string {
+	return aliasCleanRe.ReplaceAllString(strings.ToLower(s), "")
+}
+
+// documentAliases returns the lookup keys under which a page can be found by
+// a URL that is not itself indexed. Storing these lets the server resolve
+// cross-reference links with an exact index lookup instead of a substring
+// scan over the url column, which could silently match the wrong page for a
+// generic slug.
+func documentAliases(rawURL, canonicalID string) []string {
+	segs := docPathSegments(rawURL)
+	seen := map[string]bool{}
+	var aliases []string
+	add := func(a string) {
+		if a != "" && !seen[a] {
+			seen[a] = true
+			aliases = append(aliases, a)
+		}
+	}
+	if len(segs) > 0 {
+		add("slug:" + normalizeAlias(segs[len(segs)-1]))
+	}
+	if canonicalID != "" {
+		add("path:" + normalizeAlias(canonicalID))
+	}
+	return aliases
+}
+
 // pruneStale deletes documents (chunks follow via cascade) whose URLs were
 // not seen in the current run. Scoped to the products the run actually saw
 // on disk, so indexing one product's directory never deletes another's rows.
@@ -473,24 +605,103 @@ func pruneStale(ctx context.Context, pool *pgxpool.Pool, liveURLs []string) (int
 	return tag.RowsAffected(), nil
 }
 
-func loadHashes(ctx context.Context, pool *pgxpool.Pool) (map[string]string, error) {
-	rows, err := pool.Query(ctx, `SELECT url, content_hash FROM documents`)
+// documentRecord is the ingestion state of one already-indexed URL: its
+// content hash, plus whether the derived metadata added after the initial
+// release is present. A document whose content is unchanged but whose
+// metadata is missing is backfilled without re-embedding it.
+type documentRecord struct {
+	hash   string
+	metaOK bool
+}
+
+func loadHashes(ctx context.Context, pool *pgxpool.Pool) (map[string]documentRecord, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT d.url, d.content_hash,
+		       d.canonical_id <> '' AND NOT EXISTS (
+		           SELECT 1 FROM chunks c
+		           WHERE c.document_id = d.id
+		             AND (c.section_id IS NULL OR c.tsv_simple IS NULL)
+		       ) AS meta_ok
+		FROM documents d
+	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	hashes := make(map[string]string)
+	records := make(map[string]documentRecord)
 	for rows.Next() {
 		var url, hash string
-		if err := rows.Scan(&url, &hash); err != nil {
+		var metaOK bool
+		if err := rows.Scan(&url, &hash, &metaOK); err != nil {
 			return nil, err
 		}
-		hashes[url] = hash
+		records[url] = documentRecord{hash: hash, metaOK: metaOK}
 	}
-	return hashes, rows.Err()
+	return records, rows.Err()
 }
 
-func writeDocument(ctx context.Context, pool *pgxpool.Pool, doc *document) error {
+// refreshChunkMetadata recomputes everything about a page's chunks that is
+// derived rather than embedded: the two tsvectors and the stable section id.
+//
+// tsv is stemmed English, which is right for prose but destroys the
+// punctuation-heavy identifiers Splunk documentation is full of; tsv_simple
+// keeps props.conf, _time and tstats intact so they can be matched literally.
+//
+// section_id is <document key>#<heading anchor>, deduplicated within the page,
+// so it stays valid across re-ingests (unlike the SERIAL chunk id, which is
+// regenerated every time the page is rewritten).
+func refreshChunkMetadata(ctx context.Context, tx pgx.Tx, docID int, docKey, title string) error {
+	_, err := tx.Exec(ctx, `
+		WITH base AS (
+			SELECT c.id, c.chunk_index,
+			       CASE
+			           WHEN coalesce(c.heading, '') = '' THEN 'overview'
+			           ELSE coalesce(nullif(trim(both '-' from
+			                    regexp_replace(lower(c.heading), '[^a-z0-9]+', '-', 'g')), ''), 'section')
+			       END AS anchor
+			FROM chunks c
+			WHERE c.document_id = $1
+		),
+		numbered AS (
+			SELECT b.*, row_number() OVER (PARTITION BY b.anchor ORDER BY b.chunk_index) AS dup
+			FROM base b
+		)
+		UPDATE chunks c SET
+			anchor     = n.anchor,
+			section_id = $3 || '#' || n.anchor ||
+			             CASE WHEN n.dup > 1 THEN '-' || n.dup::text ELSE '' END,
+			tsv        = setweight(to_tsvector('english', $2), 'A') ||
+			             setweight(to_tsvector('english', coalesce(c.heading, '')), 'B') ||
+			             setweight(to_tsvector('english', c.content), 'C'),
+			tsv_simple = setweight(to_tsvector('simple', $2), 'A') ||
+			             setweight(to_tsvector('simple', coalesce(c.heading, '')), 'B') ||
+			             setweight(to_tsvector('simple', c.content), 'C')
+		FROM numbered n
+		WHERE n.id = c.id
+	`, docID, title, docKey)
+	return err
+}
+
+func writeAliases(ctx context.Context, tx pgx.Tx, docID int, aliases []string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM document_aliases WHERE document_id = $1`, docID); err != nil {
+		return err
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO document_aliases (alias, document_id)
+		SELECT unnest($1::text[]), $2
+		ON CONFLICT DO NOTHING
+	`, aliases, docID)
+	return err
+}
+
+// backfillDocument refreshes derived metadata for a page whose content has
+// not changed, so schema additions don't require re-embedding the corpus.
+func backfillDocument(ctx context.Context, pool *pgxpool.Pool, doc *document) error {
+	manual, canonicalID := docLocation(doc.fm.URL, doc.fm.Product, doc.fm.Version)
+
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -499,18 +710,53 @@ func writeDocument(ctx context.Context, pool *pgxpool.Pool, doc *document) error
 
 	var docID int
 	err = tx.QueryRow(ctx, `
-		INSERT INTO documents (url, title, product, version, breadcrumb, content_hash)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		UPDATE documents
+		SET manual = $2, canonical_id = $3, source_updated_at = $4
+		WHERE url = $1
+		RETURNING id
+	`, doc.fm.URL, manual, canonicalID, doc.fm.sourceUpdated()).Scan(&docID)
+	if err != nil {
+		return err
+	}
+	if err := writeAliases(ctx, tx, docID, documentAliases(doc.fm.URL, canonicalID)); err != nil {
+		return err
+	}
+	if err := refreshChunkMetadata(ctx, tx, docID, doc.key(), doc.fm.Title); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func writeDocument(ctx context.Context, pool *pgxpool.Pool, doc *document) error {
+	manual, canonicalID := docLocation(doc.fm.URL, doc.fm.Product, doc.fm.Version)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var docID int
+	err = tx.QueryRow(ctx, `
+		INSERT INTO documents (url, title, product, version, manual, canonical_id, breadcrumb, content_hash, source_updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (url) DO UPDATE
 			SET title = EXCLUDED.title,
 			    product = EXCLUDED.product,
 			    version = EXCLUDED.version,
+			    manual = EXCLUDED.manual,
+			    canonical_id = EXCLUDED.canonical_id,
 			    breadcrumb = EXCLUDED.breadcrumb,
 			    content_hash = EXCLUDED.content_hash,
+			    source_updated_at = EXCLUDED.source_updated_at,
 			    updated_at = now()
 		RETURNING id
-	`, doc.fm.URL, doc.fm.Title, doc.fm.Product, doc.fm.Version, doc.fm.breadcrumb(), doc.hash).Scan(&docID)
+	`, doc.fm.URL, doc.fm.Title, doc.fm.Product, doc.fm.Version, manual, canonicalID,
+		doc.fm.breadcrumb(), doc.hash, doc.fm.sourceUpdated()).Scan(&docID)
 	if err != nil {
+		return err
+	}
+	if err := writeAliases(ctx, tx, docID, documentAliases(doc.fm.URL, canonicalID)); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM chunks WHERE document_id = $1`, docID); err != nil {
@@ -528,17 +774,10 @@ func writeDocument(ctx context.Context, pool *pgxpool.Pool, doc *document) error
 		if err != nil {
 			return err
 		}
-		// Weighted so that a query matching a page title or section heading
-		// outranks one that only matches body text. COPY cannot compute
-		// server-side expressions, hence the separate UPDATE.
-		_, err = tx.Exec(ctx, `
-			UPDATE chunks SET tsv =
-				setweight(to_tsvector('english', $2), 'A') ||
-				setweight(to_tsvector('english', coalesce(heading, '')), 'B') ||
-				setweight(to_tsvector('english', content), 'C')
-			WHERE document_id = $1
-		`, docID, doc.fm.Title)
-		if err != nil {
+		// The tsvectors are weighted so that a query matching a page title or
+		// section heading outranks one that only matches body text. COPY
+		// cannot compute server-side expressions, hence the separate UPDATE.
+		if err := refreshChunkMetadata(ctx, tx, docID, doc.key(), doc.fm.Title); err != nil {
 			return err
 		}
 	}
@@ -576,7 +815,7 @@ func sendOutcome(ctx context.Context, outcomes chan<- outcome, result outcome) {
 	}
 }
 
-func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, cache *embedCache, paths []string, hashes map[string]string, opts options) <-chan outcome {
+func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, cache *embedCache, paths []string, hashes map[string]documentRecord, opts options) <-chan outcome {
 	parseJobs := make(chan string, opts.parseWorkers*2)
 	parsed := make(chan parseResult, opts.parseWorkers*2)
 	embedJobs := make(chan embedJob, opts.embedWorkers*2)
@@ -621,8 +860,19 @@ func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, 
 				continue
 			}
 			doc := result.doc
-			if hashes[doc.fm.URL] == doc.hash {
-				sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, product: doc.fm.Product, unchanged: true})
+			if record, ok := hashes[doc.fm.URL]; ok && record.hash == doc.hash {
+				if record.metaOK {
+					sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, product: doc.fm.Product, unchanged: true})
+					continue
+				}
+				// Content is unchanged but derived metadata is missing, so
+				// the page only needs a cheap rewrite -- skip embedding.
+				doc.metaOnly = true
+				select {
+				case completed <- doc:
+				case <-ctx.Done():
+					return
+				}
 				continue
 			}
 			doc.embeddings = make([][]float32, len(doc.chunks))
@@ -695,6 +945,14 @@ func runPipeline(ctx context.Context, pool *pgxpool.Pool, client *ollamaClient, 
 		go func() {
 			defer writeWG.Done()
 			for doc := range completed {
+				if doc.metaOnly {
+					err := backfillDocument(ctx, pool, doc)
+					if err != nil {
+						err = fmt.Errorf("backfilling %s: %w", doc.fm.URL, err)
+					}
+					sendOutcome(ctx, outcomes, outcome{url: doc.fm.URL, product: doc.fm.Product, backfilled: true, err: err})
+					continue
+				}
 				err := writeDocument(ctx, pool, doc)
 				if err != nil {
 					err = fmt.Errorf("writing %s: %w", doc.fm.URL, err)
@@ -813,7 +1071,7 @@ func main() {
 		len(paths), device, cpuCount, opts.parseWorkers, opts.embedWorkers, opts.batchSize, opts.writeWorkers)
 	client := newOllamaClient(opts.ollamaURL, opts.model, opts.embedWorkers)
 	cache := newEmbedCache()
-	completed, indexed, unchanged, failed := 0, 0, 0, 0
+	completed, indexed, unchanged, backfilled, failed := 0, 0, 0, 0, 0
 	var liveURLs []string
 	start := time.Now()
 	// Heartbeat so slow (CPU-bound) runs show liveness and rate between the
@@ -836,13 +1094,16 @@ func main() {
 			case result.unchanged:
 				unchanged++
 				liveURLs = append(liveURLs, result.url)
+			case result.backfilled:
+				backfilled++
+				liveURLs = append(liveURLs, result.url)
 			case result.url != "":
 				indexed++
 				liveURLs = append(liveURLs, result.url)
 			}
 			if completed%100 == 0 || completed == len(paths) {
-				fmt.Printf("progress: %d/%d indexed=%d unchanged=%d failed=%d\n",
-					completed, len(paths), indexed, unchanged, failed)
+				fmt.Printf("progress: %d/%d indexed=%d unchanged=%d backfilled=%d failed=%d\n",
+					completed, len(paths), indexed, unchanged, backfilled, failed)
 			}
 		case <-heartbeat.C:
 			elapsed := time.Since(start)

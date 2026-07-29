@@ -12,8 +12,28 @@ Input:
   (Lantern, dev.splunk.com, splunkui.splunk.com).
 
 Database writes:
-- `documents` rows (page metadata + content hash).
-- `chunks` rows (chunked markdown, tsvector, embedding vector).
+- `documents` rows (page metadata + content hash, plus the derived `manual`,
+  `canonical_id` and `source_updated_at`).
+- `document_aliases` rows (lookup keys letting the server resolve a URL that is
+  not itself indexed, such as a `?resourceId=` cross-reference link).
+- `chunks` rows (chunked markdown, `section_id`, `anchor`, english and simple
+  tsvectors, embedding vector).
+
+## Derived Metadata
+
+`canonical_id` is a page's version-independent identity, derived from its URL
+by dropping the version segment: the 9.4 and 10.4 copies of one page share one
+`canonical_id`. The server collapses version copies on this rather than on the
+title, because hundreds of unrelated pages are titled "Troubleshooting".
+
+`section_id` is a stable, citable handle for a chunk, built from a hash of the
+page URL and the chunk's heading. It survives a reindex, so a `section_id`
+handed to a client in one session still resolves in the next.
+
+`tsv_simple` indexes the chunk with the `simple` text search configuration,
+which does not stem or split on punctuation. This is what makes literal tokens
+like `props.conf`, `_time` and `TRANSFORMS-null` findable; the english `tsv`
+destroys them.
 
 ## Requirements
 
@@ -58,6 +78,11 @@ cd indexer
 ## Operational Notes
 
 - Indexing is incremental by content hash.
+- A page whose content is unchanged but whose derived metadata is missing or
+  stale is backfilled in place, without re-embedding. After applying a schema
+  change that adds derived columns, re-running the indexer populates them at
+  disk-read speed rather than at embedding speed; the run reports these
+  separately as `backfilled`.
 - If chunking or embedding format changes, a full reindex may be needed.
 - The process probes Ollama at startup and exits early on backend failure.
 

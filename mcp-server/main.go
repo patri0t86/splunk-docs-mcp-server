@@ -21,7 +21,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/pgvector/pgvector-go"
 	pgxvec "github.com/pgvector/pgvector-go/pgx"
 )
 
@@ -112,13 +111,6 @@ func getEnvDefault(key, fallback string) string {
 	return fallback
 }
 
-type SearchArgs struct {
-	Query      string `json:"query" jsonschema:"the search query"`
-	Product    string `json:"product,omitempty" jsonschema:"optional product to filter by, e.g. splunk-enterprise, splunk-cloud-platform, splunk-enterprise-security-8, splunk-soar, splunk-it-service-intelligence, splunk-lantern, splunk-dev, or splunk-ui"`
-	Version    string `json:"version,omitempty" jsonschema:"optional doc version to filter by for versioned products, e.g. 10.2 (Splunk Enterprise), 10.5.2605 (Splunk Cloud release train), or 8.5 (ES)"`
-	MaxResults int    `json:"max_results,omitempty" jsonschema:"maximum number of results to return, default 5"`
-}
-
 type GetPageArgs struct {
 	URL string `json:"url" jsonschema:"the documentation page URL to fetch, usually taken from a search_docs result"`
 }
@@ -159,192 +151,7 @@ func embed(ctx context.Context, text string) ([]float32, error) {
 	return result.Embedding, nil
 }
 
-// orQuery rejoins the query terms with OR so the keyword leg can still rank
-// partial matches when the full query is too strict to match any chunk.
-// ts_rank still rewards chunks matching more of the terms, so this degrades
-// gracefully rather than switching the keyword leg off entirely.
-func orQuery(q string) string {
-	fields := strings.Fields(q)
-	if len(fields) < 2 {
-		return q
-	}
-	return strings.Join(fields, " OR ")
-}
-
-// searchDocs runs keyword search (ts_rank) and semantic search (cosine
-// distance) independently, then merges them with reciprocal rank fusion
-// so neither search mode's score scale dominates the other. Results are
-// deduplicated by (product, title), keeping the newest version of each
-// page, because the corpus holds near-identical copies of every page
-// across versions — but pages in different products that happen to share
-// a title ("Fixed issues") must never collapse into one result.
-func searchDocs(ctx context.Context, req *mcp.CallToolRequest, args SearchArgs) (*mcp.CallToolResult, any, error) {
-	ctx, cancel := context.WithTimeout(ctx, toolTimeout)
-	defer cancel()
-
-	args.Query = strings.TrimSpace(args.Query)
-	if args.Query == "" {
-		return nil, nil, errors.New("query must not be empty")
-	}
-	if len(args.Query) > maxQueryLen {
-		return nil, nil, fmt.Errorf("query too long (max %d bytes)", maxQueryLen)
-	}
-	if args.MaxResults <= 0 {
-		args.MaxResults = 5
-	}
-	if args.MaxResults > maxResultsCap {
-		args.MaxResults = maxResultsCap
-	}
-	if args.Product != "" && !knownProducts[args.Product] {
-		return nil, nil, fmt.Errorf("unknown product %q; indexed products: %s",
-			args.Product, strings.Join(productList(), ", "))
-	}
-	log.Printf("search_docs: query=%q product=%q version=%q max_results=%d", args.Query, args.Product, args.Version, args.MaxResults)
-
-	release, err := acquireToolSlot(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer release()
-
-	start := time.Now()
-	// nomic-embed-text queries must carry the search_query prefix to match
-	// the search_document-prefixed vectors written by the indexer.
-	queryVec, err := embed(ctx, "search_query: "+args.Query)
-	if err != nil {
-		log.Printf("search_docs: ERROR embedding query after %s: %v", time.Since(start).Round(time.Millisecond), err)
-		return nil, nil, errors.New("search backend unavailable, try again shortly")
-	}
-	log.Printf("search_docs: embedded query in %s (%d dims)", time.Since(start).Round(time.Millisecond), len(queryVec))
-
-	dbStart := time.Now()
-	kwQuery := args.Query
-	var strictHits bool
-	// The precheck applies the same product/version filters as the keyword
-	// leg: strict hits that exist only outside the filter scope must still
-	// trigger the OR fallback.
-	err = pool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM chunks c
-			JOIN documents d ON d.id = c.document_id
-			WHERE c.tsv @@ websearch_to_tsquery('english', $1)
-			  AND ($2 = '' OR d.product = $2)
-			  AND ($3 = '' OR d.version = $3)
-		)`,
-		args.Query, args.Product, args.Version).Scan(&strictHits)
-	if err != nil {
-		log.Printf("search_docs: ERROR keyword precheck: %v", err)
-		return nil, nil, errors.New("search failed, try again shortly")
-	}
-	if !strictHits {
-		kwQuery = orQuery(args.Query)
-		log.Printf("search_docs: no strict keyword hits, retrying keyword leg as %q", kwQuery)
-	}
-
-	// Product/version filters run inside each leg, not after: with multiple
-	// products in one index, a post-filter would let the dominant products
-	// crowd a filtered query's candidates out of the fixed-size pools.
-	rows, err := pool.Query(ctx, `
-		WITH keyword AS (
-			SELECT id, row_number() OVER (ORDER BY r DESC) AS rank
-			FROM (
-				SELECT c.id, ts_rank(c.tsv, websearch_to_tsquery('english', $1)) AS r
-				FROM chunks c
-				JOIN documents d ON d.id = c.document_id
-				WHERE c.tsv @@ websearch_to_tsquery('english', $1)
-				  AND ($3 = '' OR d.product = $3)
-				  AND ($4 = '' OR d.version = $4)
-				ORDER BY r DESC
-				LIMIT 50
-			) k
-		),
-		semantic AS (
-			SELECT id, row_number() OVER (ORDER BY dist) AS rank
-			FROM (
-				SELECT c.id, c.embedding <=> $2 AS dist
-				FROM chunks c
-				JOIN documents d ON d.id = c.document_id
-				WHERE ($3 = '' OR d.product = $3)
-				  AND ($4 = '' OR d.version = $4)
-				ORDER BY dist
-				LIMIT 50
-			) s
-		),
-		hits AS (
-			SELECT COALESCE(k.id, s.id) AS id,
-			       COALESCE(1.0/(60+k.rank), 0) + COALESCE(1.0/(60+s.rank), 0) AS score,
-			       k.id IS NOT NULL AS keyword_hit
-			FROM keyword k
-			FULL OUTER JOIN semantic s ON s.id = k.id
-		),
-		scored AS (
-			SELECT d.title, d.url, d.product, d.version, d.breadcrumb, c.heading, c.content,
-			       h.score, h.keyword_hit
-			FROM hits h
-			JOIN chunks c ON c.id = h.id
-			JOIN documents d ON d.id = c.document_id
-		),
-		deduped AS (
-			SELECT *,
-			       max(score) OVER (PARTITION BY product, title) AS group_score,
-			       row_number() OVER (
-			           PARTITION BY product, title
-			           ORDER BY
-			               CASE
-			                   WHEN version ~ '^[0-9]+(\\.[0-9]+)+$' THEN string_to_array(version, '.')::int[]
-			                   ELSE NULL
-			               END DESC NULLS LAST,
-			               score DESC
-			       ) AS rn
-			FROM scored
-		)
-		SELECT title, url, product, version, breadcrumb, heading,
-		       CASE WHEN keyword_hit THEN
-		           ts_headline('english', content, websearch_to_tsquery('english', $1),
-		               'StartSel=**, StopSel=**, MaxFragments=3, MaxWords=50, MinWords=15, FragmentDelimiter=" … "')
-		       ELSE left(content, 500) END AS snippet
-		FROM deduped
-		WHERE rn = 1
-		ORDER BY group_score DESC
-		LIMIT $5
-	`, kwQuery, pgvector.NewVector(queryVec), args.Product, args.Version, args.MaxResults)
-	if err != nil {
-		log.Printf("search_docs: ERROR db query after %s: %v", time.Since(dbStart).Round(time.Millisecond), err)
-		return nil, nil, errors.New("search failed, try again shortly")
-	}
-	defer rows.Close()
-
-	var sb strings.Builder
-	count := 0
-	for rows.Next() {
-		var title, pageURL, product, version, breadcrumb, heading, snippet string
-		if err := rows.Scan(&title, &pageURL, &product, &version, &breadcrumb, &heading, &snippet); err != nil {
-			log.Printf("search_docs: ERROR scanning row: %v", err)
-			return nil, nil, errors.New("search failed, try again shortly")
-		}
-		count++
-		productLabel := product
-		if version != "" {
-			productLabel = fmt.Sprintf("%s v%s", product, version)
-		}
-		fmt.Fprintf(&sb, "## %s (%s)\n%s > %s\n%s\n\n%s\n\n---\n\n",
-			title, productLabel, breadcrumb, heading, pageURL, snippet)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("search_docs: ERROR reading rows after %s: %v", time.Since(dbStart).Round(time.Millisecond), err)
-		return nil, nil, errors.New("search failed, try again shortly")
-	}
-	if count == 0 {
-		sb.WriteString("No matching results.")
-	}
-	log.Printf("search_docs: db returned %d results in %s (total %s)",
-		count, time.Since(dbStart).Round(time.Millisecond), time.Since(start).Round(time.Millisecond))
-
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
-	}, nil, nil
-}
+// searchDocs and its helpers live in search.go.
 
 // renderPage reassembles a page from its chunks in order. Returns the
 // rendered markdown and the chunk count (0 means the URL is not indexed).
@@ -391,6 +198,16 @@ func renderPage(ctx context.Context, pageURL string) (string, int, error) {
 
 var slugCleanRe = regexp.MustCompile(`[^a-z0-9]+`)
 
+// versionSegRe matches the version segment of a documentation path: a dotted
+// release number ("10.4", "9.4.13", "10.5.2605") or the "latest" alias.
+var versionSegRe = regexp.MustCompile(`^(latest|\d+(\.\d+)*)$`)
+
+// normalizeAlias lowercases and strips every non-alphanumeric character, the
+// same normalization the indexer applies when it writes document_aliases.
+func normalizeAlias(s string) string {
+	return slugCleanRe.ReplaceAllString(strings.ToLower(s), "")
+}
+
 // extractSlug pulls a normalized (lowercase, alphanumeric-only) page slug out
 // of a URL: the topic id of a ?resourceId= redirect link, or the last path
 // segment otherwise.
@@ -408,45 +225,126 @@ func extractSlug(raw string) string {
 			slug = p
 		}
 	}
-	return slugCleanRe.ReplaceAllString(strings.ToLower(slug), "")
+	return normalizeAlias(slug)
 }
 
-// resolveURL maps a URL that is not in the index to one that is. The docs
-// cross-reference each other with help.splunk.com/?resourceId=Splunk_X_Topicid
-// redirect links whose final hop is resolved client-side in JS, so they can
-// never match an indexed URL directly. The topic id is the page's URL slug
-// with the punctuation removed (Referencehardware -> reference-hardware), so
-// matching it against hyphen-stripped indexed URLs finds the page. The same
-// trick resolves direct URLs that differ from the crawled version only in
-// path (e.g. a different manual edition), via their last path segment.
-func resolveURL(ctx context.Context, raw string) (string, bool) {
-	slug := extractSlug(raw)
-	if slug == "" {
-		return "", false
-	}
-	var resolved string
-	err := pool.QueryRow(ctx, `
-		SELECT url
-		FROM documents
-		WHERE replace(lower(url), '-', '') LIKE '%' || $1 || '%'
-		ORDER BY
-			CASE
-				WHEN version ~ '^[0-9]+(\\.[0-9]+)+$' THEN string_to_array(version, '.')::int[]
-				ELSE NULL
-			END DESC NULLS LAST,
-			length(url)
-		LIMIT 1
-	`, slug).Scan(&resolved)
+// urlProduct returns the product slug for known Splunk docs hosts, mirroring
+// the indexer so a URL maps to the same canonical identity on both sides.
+func urlProduct(raw string) string {
+	u, err := url.Parse(raw)
 	if err != nil {
-		return "", false
+		return ""
 	}
-	return resolved, true
+	switch strings.ToLower(u.Hostname()) {
+	case "lantern.splunk.com":
+		return "splunk-lantern"
+	case "dev.splunk.com":
+		return "splunk-dev"
+	case "splunkui.splunk.com":
+		return "splunk-ui"
+	case "help.splunk.com":
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) < 2 || parts[0] != "en" {
+			return ""
+		}
+		return parts[1]
+	default:
+		return ""
+	}
+}
+
+// urlAliases builds the document_aliases keys a URL could be indexed under.
+// The docs cross-reference each other with help.splunk.com/?resourceId=
+// redirect links whose final hop is resolved client-side in JS, so they never
+// match an indexed URL directly; the topic id is the page's slug with the
+// punctuation removed. Whole-path aliases additionally resolve URLs that
+// differ from the crawled one only by version or manual edition, and are
+// tried first because a slug alone ("troubleshooting") is ambiguous.
+//
+// The path alias must reproduce the indexer's canonical_id exactly — product
+// slug included, and with only the first version-like segment dropped — or the
+// exact lookup silently never matches.
+func urlAliases(raw string) []string {
+	var aliases []string
+	if u, err := url.Parse(raw); err == nil && u.Query().Get("resourceId") == "" {
+		segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+		product := urlProduct(raw)
+		if strings.EqualFold(u.Hostname(), "help.splunk.com") && len(segs) >= 2 && segs[0] == "en" {
+			segs = segs[2:]
+		}
+		canonical := make([]string, 0, len(segs))
+		dropped := false
+		for _, seg := range segs {
+			if seg == "" {
+				continue
+			}
+			if !dropped && versionSegRe.MatchString(seg) {
+				dropped = true
+				continue
+			}
+			canonical = append(canonical, seg)
+		}
+		if len(canonical) > 0 && product != "" {
+			aliases = append(aliases, "path:"+normalizeAlias(product+"/"+strings.Join(canonical, "/")))
+		}
+	}
+	if slug := extractSlug(raw); slug != "" {
+		aliases = append(aliases, "slug:"+slug)
+	}
+	return aliases
+}
+
+// resolveURL maps a URL that is not in the index to one that is, via the
+// alias table the indexer populates. Aliases are matched exactly and in
+// priority order (whole path before bare slug), so a generic slug can no
+// longer silently resolve to an unrelated page the way a substring match
+// over the url column could.
+func resolveURL(ctx context.Context, raw string) (string, bool) {
+	for _, alias := range urlAliases(raw) {
+		var resolved string
+		err := pool.QueryRow(ctx, `
+			SELECT d.url
+			FROM document_aliases a
+			JOIN documents d ON d.id = a.document_id
+			WHERE a.alias = $1
+			ORDER BY
+				CASE
+					WHEN d.version ~ '^[0-9]+(\.[0-9]+)+$' THEN string_to_array(d.version, '.')::int[]
+					ELSE NULL
+				END DESC NULLS LAST,
+				length(d.url)
+			LIMIT 1
+		`, alias).Scan(&resolved)
+		if err == nil {
+			return resolved, true
+		}
+	}
+	return "", false
+}
+
+// PageOutput is the structured form of a get_page result, so a client can
+// read the page metadata without parsing the rendered markdown.
+type PageOutput struct {
+	URL             string   `json:"url" jsonschema:"the indexed URL the content came from, which may differ from the requested one"`
+	RequestedURL    string   `json:"requested_url"`
+	Resolved        bool     `json:"resolved" jsonschema:"true when the requested URL was mapped to a different indexed URL"`
+	Found           bool     `json:"found"`
+	DocumentID      string   `json:"document_id,omitempty" jsonschema:"version-independent identifier of the page"`
+	Title           string   `json:"title,omitempty"`
+	Product         string   `json:"product,omitempty"`
+	Version         string   `json:"version,omitempty"`
+	Manual          string   `json:"manual,omitempty"`
+	Breadcrumb      []string `json:"breadcrumb,omitempty"`
+	Sections        int      `json:"sections" jsonschema:"number of sections the page was reassembled from"`
+	Content         string   `json:"content,omitempty" jsonschema:"the complete page as markdown"`
+	ContentHash     string   `json:"content_hash,omitempty"`
+	SourceUpdatedAt string   `json:"source_updated_at,omitempty"`
 }
 
 // getPage returns the full, un-truncated content of a page, reassembled
 // from its chunks in order -- for when search_docs has pointed at the
 // right page but the agent needs the whole thing.
-func getPage(ctx context.Context, req *mcp.CallToolRequest, args GetPageArgs) (*mcp.CallToolResult, any, error) {
+func getPage(ctx context.Context, req *mcp.CallToolRequest, args GetPageArgs) (*mcp.CallToolResult, *PageOutput, error) {
 	ctx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()
 
@@ -472,6 +370,7 @@ func getPage(ctx context.Context, req *mcp.CallToolRequest, args GetPageArgs) (*
 		log.Printf("get_page: ERROR after %s: %v", time.Since(start).Round(time.Millisecond), err)
 		return nil, nil, errors.New("page fetch failed, try again shortly")
 	}
+	out := &PageOutput{RequestedURL: pageURL, URL: pageURL}
 	note := ""
 	if chunks == 0 {
 		if resolved, ok := resolveURL(ctx, pageURL); ok {
@@ -481,15 +380,47 @@ func getPage(ctx context.Context, req *mcp.CallToolRequest, args GetPageArgs) (*
 				return nil, nil, errors.New("page fetch failed, try again shortly")
 			}
 			note = fmt.Sprintf("(Resolved %s to %s)\n\n", pageURL, resolved)
+			out.URL = resolved
+			out.Resolved = true
 		}
 	}
 	log.Printf("get_page: %d chunks in %s", chunks, time.Since(start).Round(time.Millisecond))
 	if chunks == 0 {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "No page found for that URL. Try search_docs to locate the page."}},
-		}, nil, nil
+		}, out, nil
 	}
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: note + text}}}, nil, nil
+	out.Found = true
+	out.Sections = chunks
+	out.Content = text
+	if err := loadPageMetadata(ctx, out); err != nil {
+		log.Printf("get_page: WARN loading metadata for %s: %v", out.URL, err)
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: note + text}}}, out, nil
+}
+
+// loadPageMetadata fills in the document-level fields of a page result. A
+// failure here is not fatal: the page content is already rendered, so the
+// caller still gets the answer, just without the citation metadata.
+func loadPageMetadata(ctx context.Context, out *PageOutput) error {
+	var breadcrumb *string
+	var sourceUpdated *time.Time
+	err := pool.QueryRow(ctx, `
+		SELECT canonical_id, title, product, version, manual, breadcrumb, content_hash, source_updated_at
+		FROM documents
+		WHERE url = $1
+	`, out.URL).Scan(&out.DocumentID, &out.Title, &out.Product, &out.Version, &out.Manual,
+		&breadcrumb, &out.ContentHash, &sourceUpdated)
+	if err != nil {
+		return err
+	}
+	if breadcrumb != nil && *breadcrumb != "" {
+		out.Breadcrumb = strings.Split(*breadcrumb, " > ")
+	}
+	if sourceUpdated != nil {
+		out.SourceUpdatedAt = sourceUpdated.UTC().Format(time.RFC3339)
+	}
+	return nil
 }
 
 // redactDSN strips the password from a connection string for logging.
