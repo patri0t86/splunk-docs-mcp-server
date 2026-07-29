@@ -24,6 +24,7 @@ Optional:
 - `OLLAMA_URL` (default `http://localhost:11434`)
 - `EMBEDDING_MODEL` (default `nomic-embed-text`)
 - `LISTEN_ADDR` (default `:8080`)
+- `MCP_ALLOWED_ORIGINS` (comma-separated browser origins allowed to call `/mcp`; unset rejects requests carrying `Origin`)
 
 ## Run
 
@@ -45,5 +46,5 @@ cd mcp-server
 
 ## Endpoints
 
-- `POST /mcp`: Streamable MCP HTTP endpoint (Bearer auth required)
+- `/mcp`: Dual-era Streamable HTTP endpoint (Bearer auth required): MCP 2026-07-28 clients use stateless POST requests; legacy clients through 2025-11-25 retain the SDK's `initialize` session flow.
 - `GET /healthz`: Liveness endpoint (no auth)

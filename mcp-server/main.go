@@ -625,21 +625,10 @@ func main() {
 	}
 	log.Println("startup: ollama OK")
 
-	server := mcp.NewServer(&mcp.Implementation{Name: "splunk-docs", Version: "1.1.0"}, nil)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_docs",
-		Description: "Search Splunk documentation (Splunk Enterprise, Splunk Cloud Platform, Enterprise Security, SOAR, IT Service Intelligence, Splunk Lantern, the Splunk Developer Program, and the Splunk UI Design System) by keyword and meaning. Returns the best-matching sections with links, deduplicated to the newest version of each page per product. Pass product (e.g. \"splunk-soar\") and/or version (e.g. \"10.2\") to narrow the search. Use get_page for the full page a result came from.",
-	}, searchDocs)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_page",
-		Description: "Fetch the full content of a Splunk documentation page by URL, typically from a search_docs result. Also resolves help.splunk.com/?resourceId=... cross-reference links and nearby URL variants.",
-	}, getPage)
-
-	handler := mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{},
+	handler := newDualMCPHandler(
+		newModernMCPHandler(os.Getenv("MCP_ALLOWED_ORIGINS")),
+		newLegacyMCPHandler(),
+		os.Getenv("MCP_ALLOWED_ORIGINS"),
 	)
 
 	// A dedicated mux (not http.DefaultServeMux) guarantees nothing else --
