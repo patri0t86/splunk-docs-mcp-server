@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 )
 
@@ -41,6 +42,7 @@ func TestModernMCPToolsList(t *testing.T) {
 		Result struct {
 			Tools []struct {
 				Name        string         `json:"name"`
+				Description string         `json:"description"`
 				InputSchema map[string]any `json:"inputSchema"`
 			} `json:"tools"`
 		} `json:"result"`
@@ -48,13 +50,26 @@ func TestModernMCPToolsList(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Result.Tools) != 2 || response.Result.Tools[0].Name != "search_docs" || response.Result.Tools[1].Name != "get_page" {
-		t.Errorf("tools = %#v, want search_docs then get_page", response.Result.Tools)
+	want := []string{"search_docs", "get_section", "get_page", "list_docsets", "compare_versions"}
+	var got []string
+	for _, tool := range response.Result.Tools {
+		got = append(got, tool.Name)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("tools = %v, want %v", got, want)
 	}
 	for _, tool := range response.Result.Tools {
 		if tool.InputSchema["type"] != "object" {
 			t.Errorf("%s input schema type = %v, want object", tool.Name, tool.InputSchema["type"])
 		}
+		// Both transports must describe a tool identically, otherwise a client
+		// gets different guidance depending on which protocol it negotiated.
+		if tool.Description != toolDescriptions[tool.Name] {
+			t.Errorf("%s description does not match the shared description", tool.Name)
+		}
+	}
+	if len(toolDescriptions) != len(want) {
+		t.Errorf("toolDescriptions has %d entries, want %d", len(toolDescriptions), len(want))
 	}
 }
 
